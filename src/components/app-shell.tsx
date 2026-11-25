@@ -10,8 +10,8 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
-  Bell, Bot, Cast, ChevronDown, Code2, Columns3, Cpu, FileSearch, GraduationCap, History, LayoutGrid, MessageSquare,
-  MoreVertical, PanelLeft, Plus, Search, Settings, Shield, ShieldAlert, Sliders, Smartphone, User, Users, Zap,
+  Activity, Bell, Bot, Cast, ChevronDown, Code2, Columns3, Cpu, FileSearch, GraduationCap, History, LayoutGrid, MessageSquare,
+  MoreVertical, PanelLeft, Plus, Search, Settings, Shield, ShieldAlert, Sliders, Smartphone, Terminal, User, Users, Zap,
 } from "lucide-react";
 import { rpc } from "@/lib/client/api";
 import { Logo } from "@/components/logo";
@@ -298,6 +298,24 @@ function SidebarBody({
         </details>
 
         <nav className="mt-4 space-y-0.5 border-t border-border pt-3" aria-label="Workspace management">
+          <Link
+            href="/agentops"
+            onClick={onNavigate}
+            aria-current={pathname.startsWith("/agentops") ? "page" : undefined}
+            className={cn("nav-item", pathname.startsWith("/agentops") && "is-active", collapsed && "justify-center px-2")}
+            title={collapsed ? "AgentOps Control" : undefined}
+          >
+            <Activity size={16} strokeWidth={1.7} /> {collapsed ? <span className="sr-only">AgentOps Control</span> : "AgentOps Control"}
+          </Link>
+          <Link
+            href="/terminal"
+            onClick={onNavigate}
+            aria-current={pathname.startsWith("/terminal") ? "page" : undefined}
+            className={cn("nav-item", pathname.startsWith("/terminal") && "is-active", collapsed && "justify-center px-2")}
+            title={collapsed ? "AI Terminal & IDE" : undefined}
+          >
+            <Terminal size={16} strokeWidth={1.7} /> {collapsed ? <span className="sr-only">AI Terminal & IDE</span> : "AI Terminal & IDE"}
+          </Link>
           {isAdmin ? (
             <Link
               href="/admin"

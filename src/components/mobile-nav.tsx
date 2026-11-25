@@ -38,6 +38,8 @@ export function buildMoreLinks({ isAdmin }: { isAdmin: boolean }): MoreLink[] {
     })),
 
     { href: "/dashboard", label: "Dashboard", icon: <LayoutGrid size={18} strokeWidth={1.7} />, group: "Workspace" },
+    { href: "/agentops", label: "AgentOps Control", icon: <Activity size={18} strokeWidth={1.7} />, group: "Workspace" },
+    { href: "/terminal", label: "AI Terminal & IDE", icon: <Code2 size={18} strokeWidth={1.7} />, group: "Workspace" },
     { href: "/projects", label: "Projects", icon: <Code2 size={18} strokeWidth={1.7} />, group: "Workspace" },
     { href: "/history", label: "History", icon: <History size={18} strokeWidth={1.7} />, group: "Workspace" },
     { href: "/workspace", label: "AI Workspace", icon: <LayoutGrid size={18} />, group: "Workspace" },

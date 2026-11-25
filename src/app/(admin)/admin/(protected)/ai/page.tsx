@@ -5,6 +5,7 @@ import { getAdminPermissions } from "@/lib/server/queries";
 import { adminRoleOf } from "@/lib/server/rpc";
 import { AdminShell } from "@/components/admin/admin-shell";
 import { AiConfigTabs } from "@/components/admin/ai-config-tabs";
+import { LifecycleAdminPanel } from "@/components/admin/lifecycle-panel";
 
 export const metadata: Metadata = { title: "Admin \u00b7 AI configuration" };
 
@@ -22,6 +23,7 @@ export default async function AdminAiPage() {
       codes={codes}
     >
       <AiConfigTabs />
+      <LifecycleAdminPanel />
     </AdminShell>
   );
 }

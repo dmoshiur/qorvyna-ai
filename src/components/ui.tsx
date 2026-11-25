@@ -68,11 +68,30 @@ export function Card({ className, children, id }: { className?: string; children
   return <div id={id} className={cn("card", !PADDING_UTILITY.test(className ?? "") && "p-5", className)}>{children}</div>;
 }
 
-export function Badge({ className, children }: { className?: string; children: ReactNode }) {
+export function Badge({
+  className,
+  tone,
+  children,
+}: {
+  className?: string;
+  tone?: "neutral" | "accent" | "success" | "warning" | "danger";
+  children: ReactNode;
+}) {
+  const toneClass =
+    tone === "accent"
+      ? "border-sky-500/30 bg-sky-500/10 text-sky-300"
+      : tone === "success"
+        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+        : tone === "warning"
+          ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+          : tone === "danger"
+            ? "border-rose-500/30 bg-rose-500/10 text-rose-300"
+            : "border-border bg-surface-2 text-ink-2";
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-lg border border-border bg-surface-2 px-2 py-0.5 text-[11px] font-medium tracking-wide text-ink-2",
+        "inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] font-medium tracking-wide",
+        toneClass,
         className,
       )}
     >

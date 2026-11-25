@@ -12,9 +12,10 @@ import "server-only";
 import crypto from "node:crypto";
 import { adminDb, nowTs, type Db } from "@/lib/firebase/admin";
 import type { SessionUser } from "@/lib/firebase/session";
-import { toolRegistry, type ToolContext, type ToolResult } from "@/lib/ai/tools/registry";
+import { toolRegistry, requiresApproval, type ToolContext, type ToolResult } from "@/lib/ai/tools/registry";
 import { hasPermission } from "@/lib/server/rpc";
-import { consumeToolApproval } from "@/lib/server/tool-approvals";
+import { approvalArgsHash, consumeToolApproval } from "@/lib/server/tool-approvals";
+import { agentOpsHandle, agentOpsStart, getServerAgentOps } from "@/lib/agentops/server";
 // Side-effect import: registers all built-in tools on the singleton registry.
 import "@/lib/ai/tools/index";
 
@@ -87,16 +88,37 @@ export async function executeAgentTool(
   user: SessionUser,
   toolId: string,
   args: unknown,
-  opts: { approvalId?: string; dryRun?: boolean; modelInitiated?: boolean } = {},
+  opts: { approvalId?: string; dryRun?: boolean; modelInitiated?: boolean; executionId?: string } = {},
 ): Promise<ToolResult & { request_id: string }> {
   const requestId = `tool_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
+  const startedAt = Date.now();
+  const standalone = !opts.executionId;
+  const executionId = opts.executionId ?? `exec_${requestId}`;
+  const agentId = getServerAgentOps().rootAgentId(executionId);
+  if (standalone) {
+    void agentOpsStart({
+      executionId,
+      requestId,
+      userId: user.uid,
+      mode: "tool_gateway",
+      modelPool: [],
+    });
+  }
   if (toolRateLimited(user.uid)) {
     await auditTool(d, user, toolId, "denied", "RATE_LIMITED", requestId);
+    void agentOpsHandle([
+      { type: "error", executionId, agentId, kind: "RATE_LIMITED", message: `Tool ${toolId} rate limited`, isRetryable: true, at: Date.now() },
+      ...(standalone ? [{ type: "execution.end" as const, executionId, status: "failed" as const, outcome: "tool_failure" as const, endedAt: Date.now(), totalDurationMs: Math.max(1, Date.now() - startedAt) }] : []),
+    ]);
     return { ok: false, error: "RATE_LIMITED", request_id: requestId };
   }
   const spec = toolRegistry.get(toolId);
   if (!spec) {
     await auditTool(d, user, toolId, "denied", "UNKNOWN_TOOL", requestId);
+    void agentOpsHandle([
+      { type: "error", executionId, agentId, kind: "UNKNOWN_TOOL", message: `Unknown tool ${toolId}`, isRetryable: false, at: Date.now() },
+      ...(standalone ? [{ type: "execution.end" as const, executionId, status: "failed" as const, outcome: "tool_failure" as const, endedAt: Date.now(), totalDurationMs: Math.max(1, Date.now() - startedAt) }] : []),
+    ]);
     return { ok: false, error: "UNKNOWN_TOOL", request_id: requestId };
   }
   if (opts.modelInitiated && spec.modelCallable !== true) {
@@ -107,6 +129,19 @@ export async function executeAgentTool(
     await auditTool(d, user, toolId, "denied", "DEVICE_SCOPE_DENIED", requestId);
     return { ok: false, error: "DEVICE_SCOPE_DENIED", request_id: requestId };
   }
+  const argsHash = approvalArgsHash(args ?? {});
+  const needsApproval = requiresApproval(spec.risk, spec.approvalRequired);
+  void agentOpsHandle({
+    type: "tool.call",
+    executionId,
+    agentId,
+    toolId,
+    argsHash,
+    risk: spec.risk,
+    approvalRequired: needsApproval,
+    startedAt,
+    requestId,
+  });
   const ctx: ToolContext = {
     db: d,
     uid: user.uid,
@@ -123,6 +158,40 @@ export async function executeAgentTool(
   };
   const approvalValidator = async () => consumeToolApproval(d, user, opts.approvalId ?? "", toolId, args);
   const result = await toolRegistry.call(ctx, toolId, args, authorizer, approvalValidator);
+  const finishedAt = Date.now();
+  void agentOpsHandle([
+    {
+      type: "tool.result",
+      executionId,
+      agentId,
+      toolId,
+      ok: result.ok,
+      error: result.error,
+      durationMs: Math.max(1, finishedAt - startedAt),
+      finishedAt,
+    },
+    ...(!result.ok && result.error === "APPROVAL_REQUIRED"
+      ? [{
+          type: "tool.approval_required" as const,
+          executionId,
+          agentId,
+          toolId,
+          approvalId: opts.approvalId || `pending_${requestId}`,
+          risk: spec.risk,
+          raisedAt: finishedAt,
+        }]
+      : []),
+    ...(standalone
+      ? [{
+          type: "execution.end" as const,
+          executionId,
+          status: result.ok ? ("completed" as const) : result.error === "APPROVAL_REQUIRED" ? ("awaiting_approval" as const) : ("failed" as const),
+          outcome: result.ok ? ("success" as const) : ("tool_failure" as const),
+          endedAt: finishedAt,
+          totalDurationMs: Math.max(1, finishedAt - startedAt),
+        }]
+      : []),
+  ]);
   if (spec.auditRequired || result.ok === false || opts.modelInitiated) {
     await auditTool(d, user, toolId, result.ok ? "ok" : "error", result.error ?? result.message ?? "executed", requestId);
   }

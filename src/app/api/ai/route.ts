@@ -48,6 +48,7 @@ import { identityAnswer, identityLanguage, identityQuestion, personaInPlay, rout
 import { isModelLane, isStrategy, type ExplainStyle, type StudyLevel } from "@/lib/ai/modes";
 import { decideRoute, planOrchestrator } from "@/lib/ai/router";
 import { isThemeIntent, THEME_GALLERY_REPLY_BN, THEME_GALLERY_REPLY_EN } from "@/lib/theme-intent";
+import { agentOpsComposeOnEvent, agentOpsHandle, agentOpsStart, getServerAgentOps } from "@/lib/agentops/server";
 import { validateImageUpload } from "@/lib/ai/upload-validation";
 import { ragSearch } from "@/lib/server/rpc";
 import { downloadImage } from "@/lib/server/cloudinary";
@@ -192,6 +193,23 @@ async function logUsage(d: Db, userId: string, model: string, requestType: strin
     // Observability must not turn a successful provider response into a chat
     // failure. Keep the diagnostic small and do not log request contents.
     console.error("[QORVYNA] AI usage log write failed.", { requestId: requestId ?? "none", error: error instanceof Error ? error.message.slice(0, 120) : "unknown" });
+  }
+  if (requestId) {
+    const raw = (tokenUsage ?? {}) as { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+    const promptTokens = Number(raw.promptTokens ?? 0) || 0;
+    const completionTokens = Number(raw.completionTokens ?? 0) || 0;
+    const totalTokens = Number(raw.totalTokens ?? promptTokens + completionTokens) || 0;
+    void agentOpsHandle({
+      type: "token.usage",
+      executionId: `exec_${requestId}`,
+      model,
+      requestType,
+      usage: { promptTokens, completionTokens, totalTokens },
+      latencyMs,
+      status,
+      requestId,
+      at: Date.now(),
+    });
   }
 }
 
@@ -789,6 +807,17 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
     { role: "user", content: redaction.redacted },
   ];
 
+  const agentOpsExecId = `exec_${requestId}`;
+  const agentOpsRootId = getServerAgentOps().rootAgentId(agentOpsExecId);
+  void agentOpsStart({
+    executionId: agentOpsExecId,
+    requestId,
+    userId: user.uid,
+    conversationId: convId ?? undefined,
+    mode,
+    modelPool: poolTargets.map((t) => t.model),
+  });
+
   // --- Provider streaming path (Chat and Agent) --------------------------------
   if (wantStream && mode !== "agent" && targets[0]?.client.streamChat) {
     let done = false;
@@ -865,7 +894,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
               messages,
               requestId,
               deadlineAt: Date.now() + 75_000,
-              onEvent: (event) => {
+              onEvent: agentOpsComposeOnEvent(agentOpsExecId, (event) => {
                 if (event.type === "task_start") {
                   upsertStep({ id: `task-${event.task.id}`, label: `${event.task.role}: ${event.task.responsibility}`, detail: event.label, status: "running", at: Date.now() });
                 } else if (event.type === "task_done") {
@@ -882,7 +911,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
                 } else {
                   upsertStep({ id: "compare", label: event.agreement === "low" ? "Compared outputs — resolving differences" : "Compared outputs", detail: event.detail, status: "done", at: Date.now() });
                 }
-              },
+              }),
             });
             for (const [model, usage] of Object.entries(collaboration.usageByModel)) {
               void logUsage(d, user.uid, model, "chat_collaboration", usage, Date.now() - started, "ok", requestId);
@@ -898,10 +927,27 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
               })();
             }
             return streamWithFallback(poolTargets, { ...request, messages: finalMessages }, {
-              onStart: (target) => { activeTarget = target; },
+              onStart: (target) => {
+                activeTarget = target;
+                void agentOpsHandle({
+                  type: "step.start",
+                  executionId: agentOpsExecId,
+                  agentId: agentOpsRootId,
+                  stepId: "generate",
+                  label: codingDetected ? "Generating code & solution" : "Writing the answer",
+                  model: target.model,
+                  provider: target.provider,
+                  startedAt: Date.now(),
+                });
+              },
               onFallback: (from, to, error) => {
                 logProviderFailure(error, requestId);
                 upsertStep({ id: `fallback-${modelLabel(from.model)}`, label: `${modelLabel(from.model)} did not respond`, detail: fallbackReason(error, to), status: "failed", at: Date.now() });
+                void agentOpsHandle([
+                  { type: "error", executionId: agentOpsExecId, agentId: agentOpsRootId, stepId: "generate", kind: providerPublicCode(error), message: `${from.model} failed`, isRetryable: true, at: Date.now() },
+                  { type: "retry", executionId: agentOpsExecId, agentId: agentOpsRootId, stepId: "generate", attempt: 1, afterMs: 0, at: Date.now() },
+                  { type: "recovery", executionId: agentOpsExecId, agentId: agentOpsRootId, strategy: `fallback_${from.model}_to_${to.model}`, at: Date.now() },
+                ]);
               },
             });
           };
@@ -1037,8 +1083,50 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
             stream_status: "complete",
             ...(degraded ? { storage_degraded: true } : {}),
           });
+          void agentOpsHandle([
+            {
+              type: "step.done",
+              executionId: agentOpsExecId,
+              agentId: agentOpsRootId,
+              stepId: "generate",
+              status: "done",
+              model: activeTarget.model,
+              attempts: [{ model: activeTarget.model, label: modelLabel(activeTarget.model), outcome: "ok", detail: activeTarget.provider }],
+              durationMs: Math.max(1, Date.now() - (genStartAt ?? started)),
+              usage: streamUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+              detail: streamedReply.slice(0, 120),
+              finishedAt: Date.now(),
+            },
+            {
+              type: "execution.end",
+              executionId: agentOpsExecId,
+              status: "completed",
+              outcome: "success",
+              endedAt: Date.now(),
+              totalDurationMs: Math.max(1, Date.now() - started),
+            },
+          ]);
         } catch (e) {
           const msg = e instanceof Error ? e.message : "stream error";
+          void agentOpsHandle([
+            {
+              type: "error",
+              executionId: agentOpsExecId,
+              agentId: agentOpsRootId,
+              kind: msg === "CLIENT_DISCONNECTED" ? "CLIENT_DISCONNECTED" : providerPublicCode(e),
+              message: msg.slice(0, 200),
+              isRetryable: msg === "CLIENT_DISCONNECTED",
+              at: Date.now(),
+            },
+            {
+              type: "execution.end",
+              executionId: agentOpsExecId,
+              status: msg === "CLIENT_DISCONNECTED" ? "cancelled" : "failed",
+              outcome: msg === "CLIENT_DISCONNECTED" ? "user_abort" : "provider_failure",
+              endedAt: Date.now(),
+              totalDurationMs: Math.max(1, Date.now() - started),
+            },
+          ]);
           if (msg !== "CLIENT_DISCONNECTED") {
             logProviderFailure(e, requestId);
             if (!full.trim()) await logUsage(d, user.uid, activeTarget.model, "chat", streamUsage ?? {}, Date.now() - started, "error", requestId);
@@ -1160,7 +1248,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
           try {
             const parsed = JSON.parse(call.function.arguments || "{}");
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Tool arguments must be a JSON object.");
-            toolResult = await executeAgentTool(d, user, name, parsed, { modelInitiated: true });
+            toolResult = await executeAgentTool(d, user, name, parsed, { modelInitiated: true, executionId: agentOpsExecId });
             toolsExecuted += 1;
           } catch (error) {
             toolResult = { ok: false, error: error instanceof Error ? error.message.slice(0, 160) : "INVALID_TOOL_ARGUMENTS" };
@@ -1176,6 +1264,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
         const toolCallId = typeof call.id === "string" ? call.id.slice(0, 128) : "invalid_tool_call";
         agentMessages.push({ role: "tool", tool_call_id: toolCallId, name: name.slice(0, 64), content: JSON.stringify(toolResult).slice(0, 6000) });
       }
+      if (getServerAgentOps().isOpen(agentOpsExecId)) break;
       result = await completeWithModel([result.target], {
         messages: agentMessages,
         ...(toolCallsProcessed < 3 ? { tools: safeTools } : {}),
@@ -1202,6 +1291,25 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
   } catch (error) {
     logProviderFailure(error, requestId);
     await logUsage(d, user.uid, activeTarget?.model ?? selectedModel, "chat", {}, Date.now() - started, "error", requestId);
+    void agentOpsHandle([
+      {
+        type: "error",
+        executionId: agentOpsExecId,
+        agentId: agentOpsRootId,
+        kind: providerPublicCode(error),
+        message: error instanceof Error ? error.message.slice(0, 200) : "provider_error",
+        isRetryable: error instanceof AIProviderError ? error.retryable : false,
+        at: Date.now(),
+      },
+      {
+        type: "execution.end",
+        executionId: agentOpsExecId,
+        status: "failed",
+        outcome: "provider_failure",
+        endedAt: Date.now(),
+        totalDurationMs: Math.max(1, Date.now() - started),
+      },
+    ]);
     return json({ error: providerPublicCode(error), conversation_id: convId, ...(userMessageId ? { user_message_id: userMessageId } : {}), ...providerDiagnostic(error, targets.length) }, providerStatus(error), requestId);
   }
 
@@ -1239,6 +1347,29 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
     finalizeFailed = true;
     logGatewayFailure("finalize_chat", { requestId, conversationId: convId }, error);
   }
+  void agentOpsHandle([
+    {
+      type: "step.done",
+      executionId: agentOpsExecId,
+      agentId: agentOpsRootId,
+      stepId: "generate",
+      status: "done",
+      model: activeTarget.model,
+      attempts: [{ model: activeTarget.model, label: modelLabel(activeTarget.model), outcome: "ok", detail: activeTarget.provider }],
+      durationMs: Math.max(1, Date.now() - started),
+      usage,
+      detail: reply.slice(0, 120),
+      finishedAt: Date.now(),
+    },
+    {
+      type: "execution.end",
+      executionId: agentOpsExecId,
+      status: "completed",
+      outcome: "success",
+      endedAt: Date.now(),
+      totalDurationMs: Math.max(1, Date.now() - started),
+    },
+  ]);
   return json({
     reply,
     files,

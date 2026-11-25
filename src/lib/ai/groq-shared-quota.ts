@@ -9,7 +9,10 @@ type State = { requests: number | null; requestsUntil: number; tokens: number | 
 const blank = (): State => ({ requests: null, requestsUntil: 0, tokens: null, tokensUntil: 0, cooldownUntil: 0, bootstrapId: "", bootstrapUntil: 0 });
 const finite = (x: unknown) => typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : null;
 const integer = (value: string | null) => value !== null && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;
-const docId = (model: string) => createHash("sha256").update(`groq:unknown-org:${model}`).digest("hex");
+const docId = (model: string, orgId?: string) => {
+  const cleanOrg = orgId?.trim() && /^[A-Za-z0-9_.-]{3,80}$/.test(orgId.trim()) ? `org:${orgId.trim()}` : "unknown-org";
+  return createHash("sha256").update(`groq:${cleanOrg}:${model}`).digest("hex");
+};
 function read(value: Record<string, unknown> | undefined, now: number): State {
   if (!value) return blank();
   const requestsUntil = finite(value.requests_until) ?? 0, tokensUntil = finite(value.tokens_until) ?? 0;
@@ -27,8 +30,8 @@ export function sharedGroqQuotaEnabled(): boolean {
 }
 
 /** Atomically reserve capacity from already-observed windows; unknown is not guessed. */
-export async function reserveGroqCapacity(d: Db, model: string, estimatedTokens: number, now = Date.now()): Promise<{ allowed: boolean; retryAt: number | null; reason: "rate_limit" | "bootstrap" | null; leaseId: string }> {
-  const ref = d.collection("provider_quota_windows").doc(docId(model));
+export async function reserveGroqCapacity(d: Db, model: string, estimatedTokens: number, now = Date.now(), organizationId?: string): Promise<{ allowed: boolean; retryAt: number | null; reason: "rate_limit" | "bootstrap" | null; leaseId: string }> {
+  const ref = d.collection("provider_quota_windows").doc(docId(model, organizationId));
   const tokens = Math.max(0, Math.ceil(estimatedTokens));
   return d.runTransaction(async (tx) => {
     const snap = await tx.get(ref); const s = read(snap.data(), now);
@@ -54,12 +57,13 @@ export async function reserveGroqCapacity(d: Db, model: string, estimatedTokens:
 
 /** Apply only genuine provider observations. Min remaining / max reset is
  * intentionally conservative for out-of-order concurrent responses. */
-export async function observeGroqCapacity(d: Db, model: string, headers: Headers, cooldownUntil = 0, now = Date.now(), leaseId = ""): Promise<void> {
+export async function observeGroqCapacity(d: Db, model: string, headers: Headers, cooldownUntil = 0, now = Date.now(), leaseId = "", organizationId?: string): Promise<void> {
   const requests = integer(headers.get("x-ratelimit-remaining-requests"));
   const tokens = integer(headers.get("x-ratelimit-remaining-tokens"));
   const reqReset = parseResetDuration(headers.get("x-ratelimit-reset-requests"));
   const tokReset = parseResetDuration(headers.get("x-ratelimit-reset-tokens"));
-  const ref = d.collection("provider_quota_windows").doc(docId(model));
+  const headerOrg = organizationId ?? headers.get("x-organization") ?? undefined;
+  const ref = d.collection("provider_quota_windows").doc(docId(model, headerOrg));
   await d.runTransaction(async (tx) => {
     const snap = await tx.get(ref); const s = read(snap.data(), now);
     if (leaseId && s.bootstrapId === leaseId) { s.bootstrapId = ""; s.bootstrapUntil = 0; }

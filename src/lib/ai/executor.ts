@@ -14,6 +14,7 @@ import type { AIMessage, AIProviderRequest, AIProviderResponse } from "@/lib/ai/
 import { AIConfigurationError, type AIRouteTarget } from "@/lib/ai/config";
 import { isRegisteredModelId } from "@/lib/ai/models/registry";
 import { AIProviderError, logProviderFailure, providerErrorFromException } from "@/lib/ai/provider-error";
+import { recordProviderCall } from "@/lib/ai/provider-latency";
 
 export type CompletedAIResponse = {
   target: AIRouteTarget;
@@ -166,6 +167,7 @@ export async function completeWithModel(
   let lastError: AIProviderError | null = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (budgetExhausted(request.deadlineAt) && lastError) throw lastError;
+    const attemptStartedAt = Date.now();
     try {
       const useStream = request.aggregateStream === true && !request.tools?.length && typeof target.client.streamChat === "function";
       let response: AIProviderResponse;
@@ -201,10 +203,12 @@ export async function completeWithModel(
           retryable: true,
         });
       }
+      recordProviderCall(target.provider, target.model, Math.max(1, Date.now() - attemptStartedAt), true);
       return { target, response };
     } catch (error) {
       if (request.signal?.aborted) throw error;
       const typed = asProviderError(target, error, request.requestId);
+      recordProviderCall(target.provider, target.model, Math.max(1, Date.now() - attemptStartedAt), false);
       lastError = typed;
       logProviderFailure(typed, request.requestId);
       if (attempt === 0 && canTryAgain(typed)) {
