@@ -1,0 +1,79 @@
+# Firebase App Hosting backend config (the managed Next.js deployment path).
+# Requires the Blaze plan. Alternative: `firebase deploy` uses the hosting +
+# frameworksBackend config in firebase.json; the app also runs anywhere Node
+# runs (Render/Vercel/Docker) with the same environment variables.
+# Note: Firebase Storage is deliberately NOT used — images live on Cloudinary
+# (free tier) via server-signed uploads of private assets.
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
+env:
+  # Client config (public by design)
+  - variable: NEXT_PUBLIC_FIREBASE_API_KEY
+    availability: [BUILD, RUNTIME]
+  # Keep PROJECT_ID.firebaseapp.com unless the /__/auth reverse proxy is
+  # deliberately enabled (docs/AUTH_DOMAIN_MIGRATION.md).
+  - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_APP_ID
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_APP_URL
+    value: https://qorvyna.thamjj13.top
+    availability: [BUILD, RUNTIME]
+  # Optional: extra exact origins allowed to create the browser session cookie.
+  - variable: QORVYNA_ALLOWED_ORIGINS
+    availability: [RUNTIME]
+  # Server-only (secrets) — App Hosting resolves these from Secret Manager when
+  # you pass --secretpath, or set them via the console.
+  - variable: FIREBASE_CLIENT_EMAIL
+    availability: [RUNTIME]
+    secret: FIREBASE_CLIENT_EMAIL
+  - variable: FIREBASE_PRIVATE_KEY
+    availability: [RUNTIME]
+    secret: FIREBASE_PRIVATE_KEY
+  - variable: CLOUDINARY_CLOUD_NAME
+    availability: [BUILD, RUNTIME]
+  - variable: CLOUDINARY_API_KEY
+    availability: [BUILD, RUNTIME]
+  - variable: CLOUDINARY_API_SECRET
+    availability: [RUNTIME]
+    secret: CLOUDINARY_API_SECRET
+  # One Groq key serves every language model. The default is GPT OSS 120B
+  # (openai/gpt-oss-120b, src/lib/ai/model.ts); other registered models are
+  # used only when Groq's live model list offers them to this account.
+  # Model IDs are not configurable here.
+  - variable: GROQ_API_KEY
+    availability: [RUNTIME]
+    secret: GROQ_API_KEY
+  # Whisper speech-to-text (same Groq key); not a language model.
+  - variable: GROQ_AUDIO_MODEL
+    value: whisper-large-v3-turbo
+    availability: [RUNTIME]
+  - variable: RESEND_API_KEY
+    availability: [RUNTIME]
+    secret: RESEND_API_KEY
+  - variable: RESEND_FROM_EMAIL
+    availability: [RUNTIME]
+  - variable: GITHUB_CLIENT_ID
+    availability: [RUNTIME]
+  - variable: GITHUB_CLIENT_SECRET
+    availability: [RUNTIME]
+    secret: GITHUB_CLIENT_SECRET
+  - variable: GITHUB_TOKEN_ENCRYPTION_KEY
+    availability: [RUNTIME]
+    secret: GITHUB_TOKEN_ENCRYPTION_KEY
+  - variable: GITHUB_OAUTH_CALLBACK_URL
+    value: https://qorvyna.thamjj13.top/api/github/callback
+    availability: [RUNTIME]
+
+  # Optional settings carry the product name as QORVYNA_<NAME> (for example
+  # QORVYNA_TRUST_PROXY_HEADERS, QORVYNA_ANDROID_APK_URL). The former
+  # MATRIX_<NAME> spelling is still read, so nothing has to be renamed here.
+  # The full list is in .env.example.

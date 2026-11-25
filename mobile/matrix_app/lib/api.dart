@@ -1,0 +1,344 @@
+/// Authenticated API client for the QORVYNA backend.
+///
+/// Pairing uses a Firebase ID token; subsequent requests use the
+/// revocable device credential in `Authorization: Bearer` — the server verifies it exactly like the
+/// web session cookie (see src/lib/firebase/session.ts). Tokens are kept in
+/// FlutterSecureStorage and never logged.
+library;
+
+import 'dart:convert';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
+import 'config.dart';
+
+class ApiException implements Exception {
+  final String code;
+  final int status;
+  ApiException(this.code, this.status);
+  @override
+  String toString() => code;
+}
+
+class MatrixApi {
+  MatrixApi({http.Client? client}) : _client = client ?? http.Client();
+  final http.Client _client;
+
+  /// Shared client for screens that are created without one.
+  static final MatrixApi instance = MatrixApi();
+  static const _storage = FlutterSecureStorage();
+
+  Future<String> _accountToken() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw ApiException('UNAUTHENTICATED', 401);
+    final token = await user.getIdToken(true);
+    if (token == null || token.isEmpty) throw ApiException('UNAUTHENTICATED', 401);
+    return token;
+  }
+
+  Future<String> _token() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw ApiException('UNAUTHENTICATED', 401);
+    final stored = await _storage.read(key: 'matrix_device_credential');
+    if (stored == null || stored.isEmpty) return _accountToken();
+    final credential = jsonDecode(stored) as Map<String, dynamic>;
+    if (credential['owner_uid'] != user.uid) {
+      throw ApiException('PAIRING_ACCOUNT_MISMATCH', 403);
+    }
+    final expiry = DateTime.tryParse(credential['expires_at']?.toString() ?? '');
+    if (expiry == null || !expiry.isAfter(DateTime.now().toUtc())) {
+      throw ApiException('DEVICE_CREDENTIAL_EXPIRED', 401);
+    }
+    final token = credential['access_token']?.toString() ?? '';
+    if (!token.startsWith('matrix_device.')) throw ApiException('DEVICE_CREDENTIAL_INVALID', 401);
+    // A revoked credential must never silently fall back to account auth.
+    return token;
+  }
+
+  Future<Map<String, dynamic>> pairDevice(Map<String, dynamic> payload) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw ApiException('UNAUTHENTICATED', 401);
+    final token = await _accountToken();
+    final response = await _sendRaw('POST', MatrixConfig.baseUri.resolve('/api/devices/pairing/complete'), token, payload);
+    final data = _decode(response);
+    if (response.statusCode != 200 || data['access_token'] == null) {
+      throw ApiException(data['error']?.toString() ?? 'PAIRING_FAILED', response.statusCode);
+    }
+    await _storage.write(key: 'matrix_device_credential', value: jsonEncode({
+      'access_token': data['access_token'],
+      'expires_at': data['access_token_expires_at'],
+      'owner_uid': user.uid,
+      'device_id': (data['device'] as Map?)?['id'],
+    }));
+    return data;
+  }
+
+  /// Account-authenticated RPC (Firebase ID token). Registering, requesting
+  /// and claiming a pairing are account actions: the server refuses them from
+  /// a device credential.
+  Future<Map<String, dynamic>> accountRpc(String action, [Map<String, dynamic> args = const {}]) async {
+    final token = await _accountToken();
+    final res = await _sendRaw('POST', MatrixConfig.baseUri.resolve('/api/rpc'), token, {'action': action, ...args});
+    final data = _decode(res);
+    if (res.statusCode != 200 || data['success'] != true) {
+      final err = data['error'];
+      final code = err is String ? err : (err is Map ? (err['code'] ?? 'HTTP_${res.statusCode}') : 'HTTP_${res.statusCode}');
+      throw ApiException(code.toString(), res.statusCode);
+    }
+    return Map<String, dynamic>.from(data['data'] as Map? ?? {'ok': true});
+  }
+
+  /// Child registration, step 1: send the scanned Parent QR (or the typed
+  /// pairing code). Returns `challenge_id`, `claim_secret` and `decide_by`.
+  /// No credential is issued until the Parent approves.
+  Future<Map<String, dynamic>> requestPairing({String? qrPayload, String? manualCode, required String deviceName}) {
+    return accountRpc('device_pairing_request', {
+      if (qrPayload != null) 'qr_payload': qrPayload,
+      if (manualCode != null) 'manual_code': manualCode,
+      'device_name': deviceName,
+      'device_type': 'phone',
+      'platform': 'android',
+      'app_version': MatrixConfig.appVersion,
+    });
+  }
+
+  /// Child registration, step 2: ask whether the Parent has decided. On
+  /// approval the device credential is returned once and stored securely.
+  /// Returns the server payload; `status` is requested / approved / denied / expired.
+  Future<Map<String, dynamic>> claimPairing({required String challengeId, required String claimSecret}) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw ApiException('UNAUTHENTICATED', 401);
+    final data = await accountRpc('device_pairing_claim', {'challenge_id': challengeId, 'claim_secret': claimSecret});
+    if (data['status'] == 'approved' && data['access_token'] != null) {
+      final device = data['device'] as Map?;
+      final parent = data['parent'] as Map?;
+      await _storage.write(key: 'matrix_device_credential', value: jsonEncode({
+        'access_token': data['access_token'],
+        'expires_at': data['access_token_expires_at'],
+        'owner_uid': user.uid,
+        'device_id': device?['id'],
+        'parent_name': parent?['device_name'],
+      }));
+    }
+    return data;
+  }
+
+  /// This device's own registration and its Parent, read with the device
+  /// credential. Throws when the device is not registered or was removed.
+  Future<Map<String, dynamic>> deviceSelf() => rpc('device_self');
+
+  static Future<bool> hasDeviceCredential() async {
+    final raw = await _storage.read(key: 'matrix_device_credential');
+    return raw != null && raw.isNotEmpty;
+  }
+
+  /// Cross-account Family pairing (`matrix-family-pair:v1.<token>`).
+  /// Signs in with the member's OWN Firebase account — no shared login needed.
+  Future<Map<String, dynamic>> pairFamilyDevice({
+    required String pairToken,
+    required String deviceName,
+    String deviceType = 'phone',
+    String platform = 'android',
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw ApiException('UNAUTHENTICATED', 401);
+    final accountJwt = await _accountToken();
+    final response = await _sendRaw(
+      'POST',
+      MatrixConfig.baseUri.resolve('/api/rpc'),
+      accountJwt,
+      {
+        'action': 'family_pairing_complete',
+        'pair_token': pairToken,
+        'device_name': deviceName,
+        'device_type': deviceType,
+        'platform': platform,
+      },
+    );
+    final envelope = _decode(response);
+    if (response.statusCode != 200 || envelope['success'] != true) {
+      final err = envelope['error'];
+      final code = err is String ? err : (err is Map ? (err['code'] ?? 'PAIRING_FAILED') : 'PAIRING_FAILED');
+      throw ApiException(code.toString(), response.statusCode);
+    }
+    final data = Map<String, dynamic>.from(envelope['data'] as Map? ?? {});
+    if (data['access_token'] != null) {
+      await _storage.write(key: 'matrix_device_credential', value: jsonEncode({
+        'access_token': data['access_token'],
+        'expires_at': data['access_token_expires_at'],
+        'owner_uid': user.uid,
+        'device_id': data['device_id'],
+        'family_id': data['family_id'],
+      }));
+    }
+    return data;
+  }
+
+  /// Poll active family screen-mirror sessions and Google Family Link lock state.
+  Future<Map<String, dynamic>> activeMirrorAndLock() => rpc('family_mirror_active');
+
+  /// Child one-tap disable of screen mirroring (requires parent re-grant to resume).
+  Future<Map<String, dynamic>> disableFamilyMirroring(String familyId) =>
+      rpc('family_mirror_consent', {'family_id': familyId, 'consent': 'revoke'});
+
+  static Future<String?> currentDeviceId() async {
+    final raw = await _storage.read(key: 'matrix_device_credential');
+    if (raw == null || raw.isEmpty) return null;
+    return (jsonDecode(raw) as Map)['device_id']?.toString();
+  }
+
+  static Future<void> clearDeviceCredential() => _storage.delete(key: 'matrix_device_credential');
+
+  Future<String?> accountLabel() async => FirebaseAuth.instance.currentUser?.email;
+
+  Map<String, String> _headers(String token) => {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      };
+
+  Future<http.Response> _send(String method, String path, [Object? body]) async {
+    final token = await _token();
+    final uri = MatrixConfig.baseUri.resolve(path);
+    final res = await _sendRaw(method, uri, token, body);
+    return res;
+  }
+
+  Future<http.Response> _sendRaw(String method, Uri uri, String token, Object? body) {
+    switch (method) {
+      case 'GET':
+        return _client.get(uri, headers: _headers(token));
+      case 'DELETE':
+        return _client.delete(uri, headers: _headers(token));
+      case 'POST':
+        return _client.post(uri, headers: _headers(token), body: body != null ? jsonEncode(body) : null);
+      default:
+        return _client.patch(uri, headers: _headers(token), body: body != null ? jsonEncode(body) : null);
+    }
+  }
+
+  /// Throws ApiException with the server's stable error code.
+  Future<Map<String, dynamic>> rpc(String action, [Map<String, dynamic> args = const {}]) async {
+    final res = await _send('POST', '/api/rpc', {'action': action, ...args});
+    final data = _decode(res);
+    if (res.statusCode != 200 || data['success'] != true) {
+      final err = data['error'];
+      final code = err is String ? err : (err is Map ? (err['code'] ?? 'HTTP_${res.statusCode}') : 'HTTP_${res.statusCode}');
+      throw ApiException(code.toString(), res.statusCode);
+    }
+    return Map<String, dynamic>.from(data['data'] as Map? ?? {'ok': true});
+  }
+
+  Future<Map<String, dynamic>> getJson(String path) async {
+    final res = await _send('GET', path);
+    final data = _decode(res);
+    if (res.statusCode != 200) {
+      throw ApiException(data['error']?.toString() ?? 'HTTP_${res.statusCode}', res.statusCode);
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> postJson(String path, [Object? body]) async {
+    final res = await _send('POST', path, body);
+    final data = _decode(res);
+    if (res.statusCode >= 400) {
+      throw ApiException(data['error']?.toString() ?? 'HTTP_${res.statusCode}', res.statusCode);
+    }
+    return data;
+  }
+
+  Future<void> deleteJson(String path) async {
+    final res = await _send('DELETE', path);
+    if (res.statusCode >= 400) {
+      final data = _decode(res);
+      throw ApiException(data['error']?.toString() ?? 'HTTP_${res.statusCode}', res.statusCode);
+    }
+  }
+
+  Map<String, dynamic> _decode(http.Response res) {
+    try {
+      return Map<String, dynamic>.from(jsonDecode(res.body) as Map? ?? {});
+    } catch (_) {
+      return {'error': 'HTTP_${res.statusCode}'};
+    }
+  }
+
+  /// Sends a chat or image request to the real QORVYNA `/api/ai` gateway
+  /// (image generation is a separate media service).
+  Future<Map<String, dynamic>> sendAiGateway(Map<String, dynamic> payload) async {
+    // Chat always runs as the signed-in account; the device credential only
+    // covers what the Parent allowed this device to do.
+    final token = await _accountToken();
+    final res = await _sendRaw('POST', MatrixConfig.baseUri.resolve('/api/ai'), token, {'stream': false, ...payload});
+    final data = _decode(res);
+    if (res.statusCode >= 400 || data['ok'] == false) {
+      final err = data['error'] ?? data['code'] ?? 'HTTP_${res.statusCode}';
+      throw ApiException(err.toString(), res.statusCode);
+    }
+    return data;
+  }
+
+  /// Keep a cached copy of the last token for diagnostics (never the raw token
+  /// is logged; storage is platform-encrypted).
+  static Future<void> rememberSignedIn() => _storage.write(key: 'matrix_signed_in', value: '1');
+
+  // --- Notification Ecosystem, Reminders, Mirroring & Device Commands --------
+
+  Future<Map<String, dynamic>> listSyncedNotifications({int limit = 50}) =>
+      rpc('notifications_sync_list', {'include_dismissed': false, 'limit': limit});
+
+  Future<Map<String, dynamic>> ingestSyncedNotification(Map<String, dynamic> payload) =>
+      rpc('notifications_sync_ingest', payload);
+
+  Future<Map<String, dynamic>> dismissSyncedNotification(String id) =>
+      rpc('notifications_sync_dismiss', {'id': id});
+
+  Future<Map<String, dynamic>> pollDeviceCommands({String? targetDeviceId}) =>
+      rpc('device_commands_poll', {if (targetDeviceId != null) 'target_device_id': targetDeviceId});
+
+  Future<Map<String, dynamic>> reportDeviceCommandResult({
+    required String commandId,
+    required bool ok,
+    required String status,
+    required String message,
+  }) =>
+      rpc('device_command_result', {
+        'command_id': commandId,
+        'ok': ok,
+        'status': status,
+        'message': message,
+      });
+
+  Future<Map<String, dynamic>> listMirrorSessions() => rpc('mirror_sessions_list');
+
+  Future<Map<String, dynamic>> respondMirrorConsent({
+    required String sessionId,
+    required bool accept,
+    bool allowRemoteControl = false,
+  }) =>
+      rpc('mirror_session_respond', {
+        'session_id': sessionId,
+        'accept': accept,
+        'allow_remote_control': allowRemoteControl,
+      });
+
+  Future<Map<String, dynamic>> postMirrorSignal({
+    required String sessionId,
+    required String fromRole,
+    required String kind,
+    required Map<String, dynamic> payload,
+  }) =>
+      rpc('mirror_session_signal', {
+        'session_id': sessionId,
+        'from_role': fromRole,
+        'kind': kind,
+        'payload': payload,
+      });
+
+  Future<Map<String, dynamic>> stopMirrorSession(String sessionId, [String reason = 'user_stopped']) =>
+      rpc('mirror_session_stop', {'session_id': sessionId, 'reason': reason});
+
+  Future<Map<String, dynamic>> createReminder(String title) =>
+      rpc('reminders_create', {'title': title});
+
+  Future<Map<String, dynamic>> listReminders() => rpc('reminders_list');
+}

@@ -1,0 +1,143 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { rpc, RpcCallError } from "@/lib/client/api";
+import { errorCodeOf, mapAdminError } from "@/lib/admin-errors";
+import { Alert, Badge, Button, Card, Input, Spinner, TableSkeleton, Textarea } from "@/components/ui";
+import { formatDate } from "@/lib/utils";
+
+type VerificationItem = {
+  id: string; user_id: string; verification_type: string; verification_status: string;
+  verification_reference: string; created_at: string;
+};
+
+export function VerificationQueue({ codes }: { codes: string[] }) {
+  const [items, setItems] = useState<VerificationItem[] | null>(null);
+  const [reason, setReason] = useState<Record<string, string>>({});
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const data = await rpc<VerificationItem[]>("admin_pending_verifications");
+      setItems(data ?? []);
+    } catch {
+      setItems([]);
+    }
+  }
+
+  useEffect(() => { if (codes.includes("verification.review")) void load(); }, [codes]);
+
+  async function review(id: string, approve: boolean) {
+    try {
+      await rpc("review_identity_verification", { verification_id: id, approve, reason: reason[id] ?? "" });
+      setMsg(approve ? "Approved — the user's age_verified flag was set server-side." : "Rejected with reason.");
+      void load();
+    } catch (err) {
+      setMsg(friendly(err, "REVIEW_FAILED"));
+    }
+  }
+
+  if (!codes.includes("verification.review")) {
+    return <Card><p className="text-sm text-ink-3">You need the <strong>verification.review</strong> permission.</p></Card>;
+  }
+  if (!items) return <Card><TableSkeleton rows={4} cols={3} label="Loading…" /></Card>;
+  if (items.length === 0) return <Card><p className="text-sm text-ink-3"> No pending age verifications.</p></Card>;
+
+  return (
+    <div className="space-y-3">
+      {msg ? <Alert tone="info">{msg}</Alert> : null}
+      {items.map((v) => (
+        <Card key={v.id}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className="border-warning/30 bg-warning-soft text-warning">pending_review</Badge>
+            <span className="font-mono text-xs text-ink-3">{v.user_id}</span>
+          </div>
+          <p className="mt-2 text-sm text-ink-2">
+            Type: {v.verification_type === "birth_certificate_number" ? "birth certificate number" : v.verification_type} · Submitted {formatDate(v.created_at)} · Masked: <code className="rounded bg-surface-2 px-1 text-xs">{v.verification_reference}</code>
+          </p>
+          <p className="mt-1 text-xs text-ink-3">
+            {v.verification_type === "birth_certificate_number"
+              ? "Only a one-way hash is stored. The raw number is never shown here, logged, or sent to the AI."
+              : "Legacy image submission — the file lives in the private identity-documents folder."}
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Input
+              value={reason[v.id] ?? ""}
+              onChange={(e) => setReason((r) => ({ ...r, [v.id]: e.target.value }))}
+              placeholder="Review note / rejection reason (required for rejection)"
+              className="max-w-sm"
+            />
+            <Button onClick={() => void review(v.id, true)}>Approve</Button>
+            <Button variant="danger" onClick={() => void review(v.id, false)}>Reject</Button>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+type ConsentItem = {
+  id: string; user_id: string; status: string; consent_method: string;
+  guardian_name: string; guardian_email: string; created_at: string;
+};
+
+export function ConsentQueue({ codes }: { codes: string[] }) {
+  const [items, setItems] = useState<ConsentItem[] | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const data = await rpc<ConsentItem[]>("admin_pending_consents");
+      setItems(data ?? []);
+    } catch {
+      setItems([]);
+    }
+  }
+
+  useEffect(() => { if (codes.includes("consent.review")) void load(); }, [codes]);
+
+  async function review(userId: string, approve: boolean) {
+    try {
+      await rpc("review_guardian_consent", { user_id: userId, approve, reason: "admin review" });
+      setMsg(approve ? "Consent approved." : "Consent revoked.");
+      void load();
+    } catch (err) {
+      setMsg(friendly(err, "REVIEW_FAILED"));
+    }
+  }
+
+  if (!codes.includes("consent.review")) {
+    return <Card><p className="text-sm text-ink-3">You need the <strong>consent.review</strong> permission.</p></Card>;
+  }
+  if (!items) return <Card><TableSkeleton rows={4} cols={3} label="Loading…" /></Card>;
+  if (items.length === 0) return <Card><p className="text-sm text-ink-3"> No pending consents.</p></Card>;
+
+  return (
+    <div className="space-y-3">
+      {msg ? <Alert tone="info">{msg}</Alert> : null}
+      {items.map((c) => (
+        <Card key={c.id}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className="border-warning/30 bg-warning-soft text-warning">pending</Badge>
+            <span className="font-mono text-xs text-ink-3">{c.user_id}</span>
+          </div>
+          <p className="mt-2 text-sm text-ink-2">
+            Guardian: <strong>{c.guardian_name || "—"}</strong> ({c.guardian_email || "no email"}) · method: {c.consent_method}
+          </p>
+          <p className="mt-1 text-xs text-ink-3">Submitted {formatDate(c.created_at)}</p>
+          <div className="mt-3 flex gap-2">
+            <Button onClick={() => void review(c.user_id, true)}>Approve</Button>
+            <Button variant="danger" onClick={() => void review(c.user_id, false)}>Revoke</Button>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+/** Internal code -> human sentence. The raw code stays in the console only. */
+function friendly(err: unknown, fallback: string): string {
+  const view = mapAdminError(errorCodeOf(err, fallback));
+  console.error("[QORVYNA admin]", view.code, err);
+  return `${view.title} — ${view.detail}`;
+}

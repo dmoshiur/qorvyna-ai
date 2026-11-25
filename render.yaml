@@ -1,0 +1,85 @@
+# Render blueprint for QORVYNA AI (Next.js web service, Firebase backend).
+# If you already created the service manually you can ignore this file — just
+# make sure the same env vars below are set in Dashboard → your service →
+# Environment. See "Deploy" in README.md (Firebase App Hosting is the
+# first-class option; Render works identically with these variables).
+services:
+  - type: web
+    name: matrix-ai
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      # Required — the app renders honest "not configured" screens without
+      # them. Values from Firebase console → Project settings.
+      - key: NEXT_PUBLIC_FIREBASE_API_KEY
+        sync: false
+      # Firebase's auth handler origin. For this hosting model keep the
+      # project's own domain (PROJECT_ID.firebaseapp.com): Google always serves
+      # and authorizes it, so no reverse proxy is involved. Only set the site's
+      # own hostname if you deliberately enable the /__/auth reverse proxy
+      # documented in docs/AUTH_DOMAIN_MIGRATION.md.
+      - key: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_APP_ID
+        sync: false
+      # Canonical public origin. This is NOT cosmetic: it is one of the exact
+      # origins allowed to create the browser session cookie, and it is the
+      # base for links/emails. It must be a hostname actually attached to THIS
+      # service (Firebase Hosting / Render / the Cloudflare subdomain). Do not
+      # set the apex (https://thamjj13.top) unless that host is also added
+      # under Render → Custom Domains, or visitors see a plain-text Not Found.
+      # 2026 domain migration: qorvyna.thamjj13.top replaced
+      # matrix.thamjj13.top. Add the old host to QORVYNA_ALLOWED_ORIGINS while
+      # it still redirects, so in-flight sessions keep working.
+      - key: NEXT_PUBLIC_APP_URL
+        value: https://qorvyna.thamjj13.top
+      # Optional: additional exact origins allowed to create the browser
+      # session cookie (comma separated). Keep a previous domain here while it
+      # still redirects to the new one.
+      - key: QORVYNA_ALLOWED_ORIGINS
+        sync: false
+      # Server-only Admin SDK + AI gateway secrets.
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      # One Groq key serves every language model. The default is GPT OSS 120B
+      # (openai/gpt-oss-120b, src/lib/ai/model.ts); other registered models are
+      # used only when Groq's live model list offers them to this account.
+      # Model IDs are not configurable here.
+      - key: GROQ_API_KEY
+        sync: false
+      # Whisper speech-to-text (same Groq key); not a language model.
+      - key: GROQ_AUDIO_MODEL
+        value: whisper-large-v3-turbo
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_TOKEN_ENCRYPTION_KEY
+        sync: false
+      # Public, non-secret URL; must exactly match the callback registered on
+      # the GitHub OAuth App and NEXT_PUBLIC_APP_URL + /api/github/callback.
+      - key: GITHUB_OAUTH_CALLBACK_URL
+        value: https://qorvyna.thamjj13.top/api/github/callback
+      # Optional settings carry the product name as QORVYNA_<NAME> (for example
+      # QORVYNA_TRUST_PROXY_HEADERS, QORVYNA_ANDROID_APK_URL). The former
+      # MATRIX_<NAME> spelling is still read, so an existing service needs no
+      # change. The full list is in .env.example.

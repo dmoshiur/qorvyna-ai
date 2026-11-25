@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "QORVYNA AI",
+  "version": "1.2.0",
+  "identifier": "ai.matrix.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:3000/native-app",
+    "beforeBuildCommand": "node scripts/native/build-native-frontend.mjs",
+    "frontendDist": "../public/native"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "QORVYNA AI",
+        "url": "index.html",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 360,
+        "minHeight": 520,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'unsafe-inline' https://apis.google.com https://www.gstatic.com",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: https://res.cloudinary.com https://*.googleusercontent.com https://*.fbcdn.net https://*.fbsbx.com",
+        "font-src": "'self' data:",
+        "media-src": "'self' blob: data: https://res.cloudinary.com",
+        "connect-src": "'self' ipc: http://ipc.localhost https://qorvyna.thamjj13.top wss://qorvyna.thamjj13.top https://*.firebaseio.com https://*.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.firebaseapp.com https://www.googleapis.com https://accounts.google.com https://res.cloudinary.com https://api.cloudinary.com",
+        "frame-src": "'self' https://qorvyna.thamjj13.top https://*.firebaseapp.com https://accounts.google.com",
+        "worker-src": "'self' blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'"
+      },
+      "dangerousDisableAssetCspModification": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "minSdkVersion": 24
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "qorvyna"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Final-round audit and staged plan
+
+This is an incremental plan, not a claim that all requested capabilities are delivered. Baseline on this checkout: 134 test files / 1,585 tests, typecheck, and production build passed. No provider credentials, production access, Firebase emulator, or real GitHub OAuth app were verified.
+
+| Feature | Current status and changes | Affected files / dependencies | Tests and documentation |
+|---|---|---|---|
+| P0 routing and latency | Artifact policy selects Cloudflare before Groq without latency evidence; streaming lacks a first-output deadline. Default to 120B, retain manual Cloudflare and fallback; bound provider attempts without restarting visible output. | AI pool, registry, executor; existing adapters | routing, timeout, cancellation and stream tests; provider routing docs |
+| P0 Groq limits | Encrypted admin keys and header tracking exist, but per-key rotation assumes independent quota. Conservatively share rate state for keys of unknown organization; do not claim independent-organization support. | accounts, Groq adapter, admin UI | rate-limit tests; credential pool docs |
+| P0 GitHub | OAuth state bound to user, encrypted token, repo list and non-force atomic push exist; live callback settings and push not verified. Tighten permission check and add one-use review snapshot with atomic expected-HEAD commit. A limited reviewed import of existing text paths with revision checks and a pre-import snapshot is implemented; same-repository PR creation, read-only inspection, and explicit reviewed merge are implemented; general pull and formal PR review remain planned, requiring design for conflicts and approvals. | github server/routes, settings | authorization tests and OAuth deployment checklist |
+| P0 brand | Public identity says THAMJJ13.TOP; internal hosts, IDs and existing certificates require compatibility. Update confirmed public attribution; legal/contact and issued certificate identity await confirmation. | brand, UI, docs | compatibility tests and migration notes |
+| P1 MCP | Existing registry/gateway is custom, not MCP. Opt-in GitHub file reader uses official SDK with a fixed destination, approval and guardian checks; mock-tested only. General MCP management and provider integrations remain incomplete. | gateway, new server modules and SDK | isolation, SSRF, consent, approvals and integration tests before rollout |
+| P1 data lifecycle | Firestore and maintenance job exist; no verified backup, comprehensive usage/billing dashboard, or general retention policy established. Document procedures and safeguards before automation. | Firestore, operational docs | emulator tests and restore drill required |
+| P2 connectors | Drive, Gmail, Photos and Meta are not implemented. Official OAuth, age/guardian policy, provider permissions and review are prerequisites. | connector infrastructure | security and live provider tests |
+
+Constitution check: preserve Firebase and native identifiers; credentials stay server-only; no automatic external write/merge; no quota assumptions; user-visible partial output is not restarted. Live deployment configuration must be verified separately.
+
+## Release and terminal gates
+
+No deployment, real GitHub OAuth/push/review/merge, Groq, Firestore emulator/transaction contention, guardian end-to-end workflow, native-device build, restore drill or external MCP call has been verified. General GitHub pull/sync, formal PR reviews, full connector suite, distributed circuit-breaker metrics and lifecycle/backup monitoring are incomplete. The separately requested real Codespaces terminal has not been implemented; Codespaces lifecycle APIs do not provide an authenticated PTY bridge. Pursuant to the required order, do not begin or claim completion of that terminal until prior stages are complete and verified. Current changes are not release-ready and must not be pushed as a final PR.

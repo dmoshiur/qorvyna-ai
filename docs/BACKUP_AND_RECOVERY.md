@@ -1,0 +1,11 @@
+# Firestore backup and recovery
+
+No backup or restore was created or verified in this checkout. Firestore is the canonical database; Cloudinary media and deployment secrets require separate backups and recovery plans. Before changing data or deploying rules, an authorized operator should:
+
+1. Identify the exact Google Cloud project, Firestore database, region, billing and recovery objectives. Choose an access-restricted Cloud Storage bucket in an appropriate location, configure retention/encryption and least-privilege IAM for the managed Firestore export service account. Verify bucket and database location compatibility in current Google Cloud documentation.
+2. Use the Firestore managed export facility (e.g. `gcloud firestore export gs://YOUR_BACKUP_BUCKET/EXPORT_PREFIX --project=YOUR_PROJECT`) or configure a supported scheduled backup/export policy in Google Cloud. These are operator-run commands, not automation supplied by this repo. Confirm the long-running operation completes successfully, not merely that it started.
+3. Record operation ID, completion time, collection scope and retention in the operator's monitoring system; alert on missing/failed jobs and unusual age. Validate IAM and cost. Never scan all documents just to populate a dashboard.
+4. Test restore into a **separate empty staging project/database**, never blindly over production. After reviewing current official import syntax, use the completed export's metadata path with `gcloud firestore import ... --project=STAGING_PROJECT`. Imports can overwrite matching documents; enforce staging isolation.
+5. Verify representative users, conversations, projects, rules/index deployment, encrypted-token decryptability with separately secured keys, and application sign-in. Record the result and duration; only then call that recovery drill verified. Test Cloudinary and secret restoration separately.
+
+The maintenance worker resumes builds and cleans execution sessions; it is not a backup service or a general Firestore TTL/retention engine. Do not automatically delete conversations, projects, certificates, identity data or user files without an approved policy and consent. Firebase console/Cloud Monitoring provide billing, storage and request metrics; this repo does not implement a complete database health dashboard.

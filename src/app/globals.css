@@ -1,0 +1,23 @@
+/* =============================================================================
+   QORVYNA V3 — CSS entry point.
+
+   The old single-file visual layer was removed and replaced by a small, layered
+   design system. Order matters: tokens first, then the reset/base, then
+   components, navigation, the chat surface, the certificate document and
+   finally utilities.
+
+   Rules:
+   · every colour, radius, space and duration comes from styles/tokens.css
+   · no ".x", ".x-new", ".x-final" override chains
+   · responsive behaviour lives with the component it belongs to
+   ============================================================================= */
+
+@import "tailwindcss";
+
+@import "../styles/tokens.css";
+@import "../styles/base.css";
+@import "../styles/components.css";
+@import "../styles/navigation.css";
+@import "../styles/chat.css";
+@import "../styles/certificate.css";
+@import "../styles/utilities.css";

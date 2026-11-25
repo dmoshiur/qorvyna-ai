@@ -1,0 +1,120 @@
+// Safe, actionable messages for Firebase client Auth errors.
+//
+// The Firebase JS SDK surfaces raw Identity Toolkit failures as opaque
+// errors — most importantly a 400 CONFIGURATION_NOT_FOUND, which means the
+// deployed API key doesn't belong to any active Firebase project (typo,
+// deleted key/project, or config copied from another app). Without this
+// mapper every such failure renders as "We couldn't sign you in" and the
+// real cause only shows in the browser console. Here we recognise
+// deployment-configuration failures and say so, in user-safe language.
+
+export type AuthErrorKind =
+  | "config" // wrong/deleted API key or project — operator must fix env + redeploy
+  | "domain" // host not in Authentication → Settings → Authorized domains
+  | "provider" // sign-in method not enabled in the Firebase console
+  | "account-exists"
+  | "session" // Firebase auth succeeded, the app session cookie did not
+  | "origin" // the server refused the session request from this domain (CSRF)
+  | "storage" // browser blocked the storage OAuth needs
+  | "popup-blocked" // browser blocked the OAuth popup window
+  | "cancelled" // user closed / cancelled the flow
+  | "invalid-credential"
+  | "network"
+  | "rate-limit"
+  | "unknown";
+
+function errorText(err: unknown): string {
+  if (!err || typeof err !== "object") return "";
+  const e = err as {
+    code?: unknown;
+    message?: unknown;
+    customData?: { errorMessage?: unknown } | undefined;
+  };
+  return [String(e.code ?? ""), String(e.message ?? ""), String(e.customData?.errorMessage ?? "")]
+    .join(" ")
+    .toLowerCase();
+}
+
+export function authErrorKind(err: unknown): AuthErrorKind {
+  const raw = errorText(err);
+  // Wrong/deleted API key or a key from a different Firebase project. The REST
+  // API answers 400 CONFIGURATION_NOT_FOUND / API_KEY_INVALID; the SDK's code
+  // string varies by version (auth/configuration-not-found,
+  // auth/api-key-not-valid…), so match generously across spellings.
+  if (/configuration[_-]?not[_-]?found|api[_-]?key[_-]?not[_-]?valid|invalid[_-]?api[_-]?key/.test(raw)) {
+    return "config";
+  }
+  if (raw.includes("unauthorized-domain") || raw.includes("unauthorized_continue_uri")) return "domain";
+  // The deployment's mutation guard rejected the session request: the origin
+  // the browser used is not in the allowed list (a domain migration symptom).
+  if (raw.includes("bad_origin") || raw.includes("bad-origin")) return "origin";
+  if (
+    raw.includes("web-storage-unsupported") ||
+    raw.includes("third-party-cookie-blocked") ||
+    raw.includes("storage-partitioned")
+  ) {
+    return "storage";
+  }
+  if (
+    raw.includes("popup-blocked")
+  ) {
+    return "popup-blocked";
+  }
+  if (
+    raw.includes("popup-closed-by-user") ||
+    raw.includes("cancelled-popup-request") ||
+    raw.includes("user-cancelled") ||
+    raw.includes("redirect-cancelled-by-user")
+  ) {
+    return "cancelled";
+  }
+  if (raw.includes("operation-not-allowed")) return "provider";
+  if (raw.includes("account-exists-with-different-credential") || raw.includes("credential-already-in-use")) {
+    return "account-exists";
+  }
+  if (raw.includes("session_mint_failed") || raw.includes("session mint")) return "session";
+  if (raw.includes("network-request-failed")) return "network";
+  if (raw.includes("too-many-requests") || raw.includes("too_many_attempts")) return "rate-limit";
+  if (/(invalid-credential|invalid_login_credentials|wrong-password|user-not-found|user_not_found)/.test(raw)) {
+    return "invalid-credential";
+  }
+  return "unknown";
+}
+
+/** True when the error means the deployment's Firebase configuration itself is
+ *  broken — nothing the user did, and retrying won't help. */
+export function isFirebaseConfigError(err: unknown): boolean {
+  const kind = authErrorKind(err);
+  return kind === "config" || kind === "domain" || kind === "provider";
+}
+
+const COPY: Record<AuthErrorKind, string> = {
+  config:
+    "Server setup problem — this deployment's Firebase configuration is invalid (wrong or deleted API key/project). Signing in cannot work until the administrator fixes NEXT_PUBLIC_FIREBASE_API_KEY / NEXT_PUBLIC_FIREBASE_PROJECT_ID and redeploys.",
+  domain:
+    "Server setup problem — this site's domain isn't approved in Firebase yet (console → Authentication → Settings → Authorized domains). The administrator needs to add it.",
+  provider:
+    "Server setup problem — this sign-in method isn't enabled in Firebase (console → Authentication → Sign-in method).",
+  "account-exists":
+    "An account with this email already exists. Sign in with email and password, then link Google in Settings.",
+  session:
+    "Signed in with your account, but the server could not create your session. Tap Retry session — you will not create a second account.",
+  origin:
+    "You're signed in, but this domain is not allowed to create the QORVYNA session. An administrator must include this hostname in NEXT_PUBLIC_APP_URL (or QORVYNA_ALLOWED_ORIGINS) and redeploy — your account is fine.",
+  storage:
+    "Your browser blocked the storage this sign-in needs. Allow cookies/site data for this domain (or leave private browsing) and try again.",
+  "popup-blocked":
+    "Your browser blocked the sign-in popup. Allow popups for this site and try again, or sign in with email and password.",
+  cancelled: "",
+  "invalid-credential": "Incorrect email or password.",
+  network: "Network problem — check your connection and try again.",
+  "rate-limit": "Too many attempts. Please wait a moment and try again.",
+  unknown: "",
+};
+
+/** Map a Firebase Auth error to a user-safe message. `fallback` is returned
+ *  for ordinary failures the caller already has copy for. */
+export function describeAuthError(err: unknown, fallback: string): string {
+  const kind = authErrorKind(err);
+  return COPY[kind] || fallback;
+}

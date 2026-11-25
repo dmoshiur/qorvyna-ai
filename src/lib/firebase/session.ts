@@ -1,0 +1,147 @@
+// Server-side session management: Firebase Auth session cookies.
+//
+// The browser signs in with the Firebase client SDK, POSTs the resulting
+// ID token to /api/auth/session, and the server exchanges it for a signed
+// httpOnly session cookie (`__session`, 5 days). Server components and API
+// routes verify that cookie with the Admin SDK — the same contract the old
+// Supabase cookie sessions provided, so SSR keeps working unchanged.
+//
+// Middleware (edge runtime, no Admin SDK) only performs a cheap, unverified
+// presence/expiry check for routing; every privileged read verifies the
+// signature server-side.
+
+import "server-only";
+import { cookies, headers } from "next/headers";
+import type { NextRequest } from "next/server";
+import { adminAuth, adminConfigured } from "@/lib/firebase/admin";
+
+export const SESSION_COOKIE = "__session";
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 5; // 5 days (Firebase max: 2 weeks)
+
+export type SessionUser = {
+  uid: string;
+  email: string | null;
+  emailVerified: boolean;
+  deviceId?: string;
+  scopes?: string[];
+};
+
+/** Exchange a fresh client ID token for a session cookie. Returns cookie options. */
+export async function createSessionCookie(idToken: string): Promise<string> {
+  return adminAuth().createSessionCookie(idToken, { expiresIn: SESSION_MAX_AGE_SECONDS * 1000 });
+}
+
+/** Verify the session cookie → Firebase decoded claims. Throws on invalid/expired. */
+export async function verifySession(cookieValue: string): Promise<SessionUser> {
+  const decoded = await adminAuth().verifySessionCookie(cookieValue, true);
+  return {
+    uid: decoded.uid,
+    email: decoded.email ?? null,
+    emailVerified: decoded.email_verified ?? false,
+  };
+}
+
+/** Extract a Bearer token from an Authorization header value (pure, testable). */
+export function extractBearerToken(header: string | null | undefined): string | null {
+  if (!header) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1].trim() : null;
+}
+
+/**
+ * Verify a raw Firebase ID token (used by native mobile/desktop clients that
+ * cannot hold httpOnly cookies). Server-verified exactly like the cookie path.
+ */
+export async function verifyIdToken(idToken: string): Promise<SessionUser> {
+  const decoded = await adminAuth().verifyIdToken(idToken, true);
+  return { uid: decoded.uid, email: decoded.email ?? null, emailVerified: decoded.email_verified ?? false };
+}
+
+function extractCookieFromHeader(cookieHeader: string | null | undefined, name: string): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    if (part.slice(0, eq).trim() === name) {
+      const raw = part.slice(eq + 1).trim();
+      if (!raw) return null;
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    }
+  }
+  return null;
+}
+
+/** Current signed-in user for server components and route handlers, or null. */
+export async function getSessionUser(request?: Request): Promise<SessionUser | null> {
+  if (!adminConfigured()) return null;
+  // Native apps (Android/Windows/Wear) authenticate with a Firebase ID token
+  // in the Authorization header; browsers use the httpOnly session cookie.
+  let authorization: string | null = null;
+  if (request) {
+    authorization = request.headers.get("authorization");
+  } else {
+    try {
+      const hdrs = await headers();
+      authorization = hdrs.get("authorization");
+    } catch {
+      authorization = null;
+    }
+  }
+  if (authorization !== null) {
+    const bearer = extractBearerToken(authorization);
+    if (!bearer) return null;
+    try {
+      return await verifyIdToken(bearer);
+    } catch {
+      // Explicit invalid credentials must never fall back to another identity.
+      return null;
+    }
+  }
+
+  let value: string | undefined;
+  if (request) {
+    const nextReq = request as Partial<NextRequest>;
+    if (nextReq.cookies && typeof nextReq.cookies.get === "function") {
+      value = nextReq.cookies.get(SESSION_COOKIE)?.value;
+    } else {
+      value = extractCookieFromHeader(request.headers.get("cookie"), SESSION_COOKIE) ?? undefined;
+    }
+  }
+  if (!value) {
+    try {
+      const store = await cookies();
+      value = store.get(SESSION_COOKIE)?.value;
+    } catch {
+      return null;
+    }
+  }
+  if (!value) return null;
+  try {
+    return await verifySession(value);
+  } catch {
+    return null;
+  }
+}
+
+/** Cookie write options shared by the mint and refresh endpoints. */
+export function sessionCookieOptions(req?: NextRequest) {
+  const forwarded = req?.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const urlHttps = req?.nextUrl.protocol === "https:";
+  const host = (req?.headers.get("host") ?? req?.nextUrl.hostname ?? "").toLowerCase().replace(/:\d+$/, "");
+  const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "[::1]";
+  const secure =
+    forwarded === "https" ||
+    urlHttps ||
+    (process.env.NODE_ENV === "production" && forwarded !== "http" && !isLoopback);
+  return {
+    httpOnly: true,
+    secure,
+    sameSite: "lax" as const,
+    path: "/",
+    maxAge: SESSION_MAX_AGE_SECONDS,
+  };
+}

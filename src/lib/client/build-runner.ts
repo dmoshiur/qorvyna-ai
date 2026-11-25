@@ -1,0 +1,324 @@
+"use client";
+
+// =============================================================================
+// QORVYNA build client (§2, §3, §4, §24)
+//
+// One code path for the UI: start a run, follow the real events, and fall back
+// to polling the persisted run if the stream drops. The client never derives
+// progress locally — it mirrors whatever the pipeline reported. If the stream
+// goes silent, `applyStaleness` (the same rule the server uses) fails the run
+// so "Publishing..." can never stay on screen forever.
+// =============================================================================
+
+import type { PendingAgentTask } from "@/lib/ai/agent-execution";
+import type { BuildStageId, BuildRun } from "@/lib/deploy/stages";
+import { applyStaleness, MAX_RUN_SEGMENTS } from "@/lib/deploy/stages";
+import { optionalAuthHeaders, rpc } from "@/lib/client/api";
+
+export type BuildStreamEvent = {
+  type?: "accepted" | "run" | "done" | "error";
+  stage?: BuildStageId;
+  run?: BuildRun;
+  code?: string;
+  message?: string;
+  run_id?: string;
+  reply?: string;
+  project_id?: string | null;
+  conversation_id?: string | null;
+};
+
+export type BuildDonePayload = { run: BuildRun | null; reply: string; projectId: string | null; conversationId: string | null };
+
+export type BuildStreamHandlers = {
+  onRun?: (run: BuildRun, stage?: BuildStageId) => void;
+  onError?: (code: string, message: string) => void;
+  onDone?: (payload: BuildDonePayload) => void;
+  signal?: AbortSignal;
+};
+
+export type BuildStartInput = {
+  prompt: string;
+  taskContext?: PendingAgentTask | null;
+  visibleMessage?: string;
+  projectId?: string | null;
+  workspaceProjectId?: string | null;
+  conversationId?: string | null;
+  /** Temporary chats never touch conversation storage — no thread is written. */
+  isTemporary?: boolean;
+  /** Preserve whether this workspace task was initiated from Code or Agent mode. */
+  mode?: "code" | "agent";
+  /** Generate and persist source files without claiming build or preview validation. */
+  workspaceOnly?: boolean;
+  /** Attached text/code files, stored as real project files by the pipeline. */
+  attachments?: Array<{ name: string; content: string }>
+  actions?: { build?: boolean; publish?: boolean; preview?: boolean; fix?: boolean };
+  slug?: string | null;
+  /** Where the deployment goes — only environments the host reports as supported. */
+  environment?: "preview" | "production";
+  allowOverride?: boolean;
+  imageRequests?: Array<{ name: string; prompt: string }>;
+  maxFixAttempts?: number;
+  requestId?: string;
+  /** Run again / Retry: the prompt is already stored in this conversation. */
+  reuseUser?: boolean;
+  /** Voice message: the private recording whose transcript is the prompt. */
+  audioAssetId?: string | null;
+};
+
+const IDLE_TIMEOUT_MS = 90_000;
+const POLL_INTERVAL_MS = 3_000;
+const POLL_LIMIT_MS = 20 * 60_000;
+
+/**
+ * POST /api/build with `Accept: text/event-stream`. Resolves with the final
+ * run as reported by the server (or the last known state if it went silent).
+ */
+export async function streamBuildRun(
+  input: BuildStartInput,
+  handlers: BuildStreamHandlers = {},
+): Promise<{ run: BuildRun | null; reply: string; projectId: string | null; conversationId: string | null }> {
+  const first = await streamSegment({
+    prompt: input.prompt,
+    task_context: input.taskContext ?? null,
+    visible_message: input.visibleMessage ?? null,
+    project_id: input.projectId ?? null,
+    workspace_project_id: input.workspaceProjectId ?? null,
+    conversation_id: input.conversationId ?? null,
+    is_temporary: input.isTemporary === true,
+    mode: input.mode === "code" ? "code" : "agent",
+    workspace_only: input.workspaceOnly === true,
+    attachments: (input.attachments ?? []).map((file) => ({ name: file.name, content: file.content })),
+    actions: input.actions ?? null,
+    slug: input.slug ?? null,
+    environment: input.environment ?? "production",
+    allow_override: input.allowOverride === true,
+    image_requests: input.imageRequests ?? [],
+    max_fix_attempts: input.maxFixAttempts ?? undefined,
+    request_id: input.requestId ?? crypto.randomUUID(),
+    reuse_user: input.reuseUser === true,
+    audio_asset_id: input.audioAssetId ?? undefined,
+  }, handlers);
+  return continueWhilePaused(first, handlers);
+}
+
+/** Longest the open chat waits for a provider cool-down before leaving the run to background recovery. */
+const MAX_INLINE_WAIT_MS = 120_000;
+
+type SegmentResult = { run: BuildRun | null; reply: string; projectId: string | null; conversationId: string | null; done: BuildDonePayload | null };
+
+/**
+ * A paused run is not finished: it continues in a new execution session. The
+ * same run, chat and project are used — the server creates nothing new — so to
+ * the user this is one uninterrupted task.
+ */
+async function continueWhilePaused(segment: SegmentResult, handlers: BuildStreamHandlers): Promise<{ run: BuildRun | null; reply: string; projectId: string | null; conversationId: string | null }> {
+  let current = segment;
+  let reply = segment.reply;
+  for (let turn = 0; turn < MAX_RUN_SEGMENTS; turn += 1) {
+    const run = current.run;
+    if (!run || run.status !== "paused" || !run.continuation?.available || handlers.signal?.aborted) break;
+    const wait = Math.max(run.continuation.reason === "provider_unavailable" ? 8_000 * (turn + 1) : 600, (run.continuation.retryAt ?? 0) - Date.now());
+    if (wait > MAX_INLINE_WAIT_MS) break; // background recovery continues it when the provider allows
+    await sleep(wait, handlers.signal);
+    if (handlers.signal?.aborted) break;
+    let next: SegmentResult;
+    try {
+      next = await streamSegment({ resume_run_id: run.id }, handlers);
+    } catch (error) {
+      if (error instanceof BuildRunError && error.code === "ALREADY_RESUMING") {
+        // Another tab or the recovery job took it: follow the stored run.
+        const polled = await pollBuildRun(run.id, handlers);
+        next = { run: polled, reply: "", projectId: polled?.projectId ?? null, conversationId: current.conversationId, done: null };
+      } else {
+        break;
+      }
+    }
+    if (!next.run) break;
+    reply = next.reply || reply;
+    current = { ...next, conversationId: next.conversationId ?? current.conversationId };
+  }
+  const final = { run: current.run, reply, projectId: current.run?.projectId ?? current.projectId, conversationId: current.conversationId };
+  handlers.onDone?.(final);
+  return final;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+/** Continue a paused or failed-but-resumable run from a button ("Continue" / "Retry"). */
+export async function resumeBuildRun(runId: string, handlers: BuildStreamHandlers = {}): Promise<{ run: BuildRun | null; reply: string; projectId: string | null; conversationId: string | null }> {
+  const first = await streamSegment({ resume_run_id: runId }, handlers);
+  return continueWhilePaused(first, handlers);
+}
+
+async function streamSegment(body: Record<string, unknown>, handlers: BuildStreamHandlers): Promise<SegmentResult> {
+  let donePayload: BuildDonePayload | null = null;
+  let reply = "";
+  let conversationId: string | null = null;
+  const controller = new AbortController();
+  const external = handlers.signal;
+  if (external) external.addEventListener("abort", () => controller.abort(), { once: true });
+
+  let last: BuildRun | null = null;
+  let idle: ReturnType<typeof setTimeout> | null = null;
+  const armIdle = () => {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => {
+      // The stream stalled: switch to polling the stored run, which keeps the
+      // UI truthful without inventing progress.
+      void pollBuildRun(last?.id ?? "", handlers).then((run) => {
+        if (run) {
+          last = run;
+          handlers.onRun?.(run);
+        }
+      }).catch(() => {
+        handlers.onError?.("BUILD_STREAM_INTERRUPTED", "QORVYNA lost the live build feed. Refresh the project to see its real state.");
+      });
+      controller.abort();
+    }, IDLE_TIMEOUT_MS);
+  };
+
+  armIdle();
+  try {
+    const authHeaders = await optionalAuthHeaders();
+    const res = await fetch("/api/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeaders },
+      credentials: "same-origin",
+      signal: controller.signal,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok || !res.body) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: unknown };
+      // Keep the server's own explanation: it says WHY nothing was started.
+      throw new BuildRunError(data.error ?? `BUILD_HTTP_${res.status}`, typeof data.detail === "string" && data.detail.trim() ? data.detail.trim() : null, res.status);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      armIdle();
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() ?? "";
+      for (const chunk of chunks) {
+        const line = chunk.trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let event: BuildStreamEvent;
+        try {
+          event = JSON.parse(payload) as BuildStreamEvent;
+        } catch {
+          continue;
+        }
+        if (event.type === "error") {
+          handlers.onError?.(event.code ?? "BUILD_RUN_FAILED", event.message ?? "The build stopped.");
+          continue;
+        }
+        if (event.type === "done") {
+          reply = event.reply ?? reply;
+          conversationId = event.conversation_id ?? conversationId;
+          if (event.run) last = event.run;
+          donePayload = { run: event.run ?? null, reply, projectId: event.project_id ?? null, conversationId };
+          continue;
+        }
+        if (event.conversation_id) conversationId = event.conversation_id;
+        if (event.run) {
+          last = event.run;
+          handlers.onRun?.(event.run, event.stage);
+        }
+      }
+    }
+    if (buffer.trim().startsWith("data:")) {
+      const payload = buffer.trim().slice(5).trim();
+      if (payload && payload !== "[DONE]") {
+        try {
+          const event = JSON.parse(payload) as BuildStreamEvent;
+          if (event.reply) reply = event.reply;
+          if (event.run) {
+            last = event.run;
+            handlers.onRun?.(event.run, event.stage);
+          }
+        } catch {
+          /* trailing partial event — the poll path will reconcile */
+        }
+      }
+    }
+  } catch (error) {
+    if ((error as Error)?.name !== "AbortError") throw error;
+  } finally {
+    if (idle) clearTimeout(idle);
+  }
+  // The feed ending is NOT the run ending. A dropped stream, an idle abort or
+  // a restarted server leaves the run non-terminal, and the stored document is
+  // the only thing that can say whether a worker is still alive. Follow it to a
+  // real terminal state instead of returning "Running" to the UI.
+  const stopAfterFeed = handlers.signal?.aborted === true;
+  const beforePoll = last as BuildRun | null;
+  if (!stopAfterFeed && beforePoll && isInFlight(beforePoll)) {
+    const polled = await pollBuildRun(beforePoll.id, handlers).catch(() => null);
+    if (polled) last = polled;
+  }
+  // Anything still "running" after that is judged by its own timestamps.
+  const run = last ? applyStaleness(last, Date.now()) : null;
+  return { run, reply, projectId: run?.projectId ?? null, conversationId, done: donePayload };
+}
+
+/** A run whose worker may still be working on it. */
+function isInFlight(run: BuildRun): boolean {
+  return run.status === "running" || run.status === "requested";
+}
+
+/**
+ * Poll the persisted run (after a reload, when the stream dropped, or while a
+ * worker is still alive). Every read goes through the server, which reconciles
+ * a silent worker to `failed`, so this loop ends for a reason rather than
+ * spinning forever.
+ */
+export async function pollBuildRun(runId: string, handlers: BuildStreamHandlers = {}): Promise<BuildRun | null> {
+  if (!runId) return null;
+  const deadline = Date.now() + POLL_LIMIT_MS;
+  let latest: BuildRun | null = null;
+  while (Date.now() < deadline) {
+    if (handlers.signal?.aborted) return latest;
+    const run = await readBuildRun(runId);
+    if (!run) return latest;
+    // Never move a card backwards: a slow poll must not undo a newer event.
+    if (!latest || run.updatedAt >= latest.updatedAt || isTerminal(run)) {
+      latest = run;
+      handlers.onRun?.(run);
+    }
+    if (isTerminal(run) || run.status === "paused") return run;
+    await sleep(POLL_INTERVAL_MS, handlers.signal);
+  }
+  const final = await readBuildRun(runId);
+  return final ? applyStaleness(final, Date.now()) : latest;
+}
+
+function isTerminal(run: BuildRun): boolean {
+  return run.status === "succeeded" || run.status === "failed" || run.status === "cancelled" || run.status === "awaiting_input";
+}
+
+export async function readBuildRun(runId: string): Promise<BuildRun | null> {
+  const data = await rpc<{ run: BuildRun | null }>("build_run_get", { run_id: runId }).catch(() => null);
+  return data?.run ?? null;
+}
+
+export async function readLatestBuildRun(projectId: string): Promise<BuildRun | null> {
+  const data = await rpc<{ run: BuildRun | null }>("build_run_latest", { project_id: projectId }).catch(() => null);
+  return data?.run ?? null;
+}
+
+export class BuildRunError extends Error {
+  constructor(readonly code: string, readonly detail: string | null = null, readonly status: number | null = null) {
+    super(code);
+    this.name = "BuildRunError";
+  }
+}
