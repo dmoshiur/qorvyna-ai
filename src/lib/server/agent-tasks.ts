@@ -14,6 +14,7 @@ import { nowTs, type Db } from "@/lib/firebase/admin";
 import type { SessionUser } from "@/lib/firebase/session";
 import { RpcError } from "@/lib/server/rpc";
 import type { BuildRun, BuildStageId } from "@/lib/deploy/stages";
+import { agentOpsHandle, agentOpsStart, getServerAgentOps } from "@/lib/agentops/server";
 
 export { RpcError };
 
@@ -110,6 +111,13 @@ export async function createAgentTask(
     metadata: { project_id: input.project_id ?? null },
     created_at: now,
   });
+  void agentOpsStart({
+    executionId: `task_${ref.id}`,
+    userId: user.uid,
+    conversationId: input.conversation_id ?? undefined,
+    mode: "agent_task",
+    modelPool: input.model ? [input.model] : [],
+  });
   return { ...((await ref.get()).data() as AgentTask), id: ref.id };
 }
 
@@ -144,6 +152,44 @@ export async function appendCheckpoint(
     at: nowTs(),
   });
   await ref.set({ updated_at: nowTs() }, { merge: true });
+  const execId = `task_${taskId}`;
+  const rootAgent = getServerAgentOps().rootAgentId(execId);
+  if (input.state === "started") {
+    void agentOpsHandle({
+      type: "step.start",
+      executionId: execId,
+      agentId: rootAgent,
+      stepId: `cp-${checkpoint.step}-${n}`,
+      label: `checkpoint: ${checkpoint.step}`,
+      model: String(taskSnap.data()?.model ?? "unknown"),
+      provider: "agent_pipeline",
+      startedAt: Date.now(),
+    });
+  } else if (input.state === "ok" || input.state === "failed") {
+    void agentOpsHandle({
+      type: "step.done",
+      executionId: execId,
+      agentId: rootAgent,
+      stepId: `cp-${checkpoint.step}-${n}`,
+      status: input.state === "ok" ? "done" : "failed",
+      model: String(taskSnap.data()?.model ?? "unknown"),
+      attempts: [],
+      durationMs: 1,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      detail: checkpoint.detail,
+      finishedAt: Date.now(),
+    });
+  } else if (input.state === "needs_approval") {
+    void agentOpsHandle({
+      type: "tool.approval_required",
+      executionId: execId,
+      agentId: rootAgent,
+      toolId: checkpoint.step,
+      approvalId: `cp_approval_${taskId}_${n}`,
+      risk: "high",
+      raisedAt: Date.now(),
+    });
+  }
   return checkpoint;
 }
 
@@ -234,6 +280,17 @@ export async function syncBuildTask(d: Db, user: SessionUser, taskId: string, ru
   const status: TaskStatus = execution === "DEPLOYED" || (run.status === "succeeded" && !run.actions.publish) ? "completed" : execution === "FAILED" ? "failed" : execution === "CLARIFICATION_REQUIRED" ? "awaiting_input" : execution === "CANCELLED" ? "cancelled" : run.status === "requested" ? "planning" : "running";
   const closed = status === "completed" || status === "failed" || status === "cancelled";
   await ref.set({ project_id: run.projectId ?? null, build_run_id: run.id, execution_state: execution, status, build_status: run.status, deployment_status: run.deployment?.status ?? null, error: run.error ?? null, updated_at: nowTs(), ...(closed ? { finished_at: nowTs() } : {}) }, { merge: true });
+  if (closed) {
+    const execId = `task_${taskId}`;
+    void agentOpsHandle({
+      type: "execution.end",
+      executionId: execId,
+      status: status === "completed" ? "completed" : status === "cancelled" ? "cancelled" : "failed",
+      outcome: status === "completed" ? "success" : status === "cancelled" ? "cancelled" : "model_failure",
+      endedAt: Date.now(),
+      totalDurationMs: 1,
+    });
+  }
 }
 
 export async function cancelAgentTask(d: Db, user: SessionUser, taskId: string) {

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { getCurrentUser } from "@/lib/data";
 import { QORVYNA_MODES } from "@/lib/ai/modes";
 import { AgentToolsPanel } from "@/components/agent-tools-panel";
+import { McpConnectorsPanel } from "@/components/mcp/mcp-connectors-panel";
 
 export const metadata = { title: "Workspace" } as const;
 
@@ -41,8 +42,25 @@ export default async function WorkspacePage() {
             </span>
           </Link>
         </li>
+        <li>
+          <Link href="/agentops" className="suggest-card w-full">
+            <span>
+              <span className="block text-sm font-semibold text-ink">AgentOps Control Center</span>
+              <span className="block text-[12px] text-ink-3">Live traces, circuit breaker, HITL &amp; OTel economics</span>
+            </span>
+          </Link>
+        </li>
+        <li>
+          <Link href="/terminal" className="suggest-card w-full">
+            <span>
+              <span className="block text-sm font-semibold text-ink">AI Terminal &amp; Coding IDE</span>
+              <span className="block text-[12px] text-ink-3">Governed qsh sandbox, live preview &amp; AI diff patches</span>
+            </span>
+          </Link>
+        </li>
       </ul>
       <AgentToolsPanel />
+      <McpConnectorsPanel />
     </div>
   );
 }

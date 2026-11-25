@@ -180,6 +180,38 @@
         { "fieldPath": "owner_uid", "order": "ASCENDING" },
         { "fieldPath": "created_at", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "agentops_executions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "startedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "agentops_audit",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "executionId", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "agentops_spans",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "traceId", "order": "ASCENDING" },
+        { "fieldPath": "startTime", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "agentops_runs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "datasetId", "order": "ASCENDING" },
+        { "fieldPath": "startedAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [

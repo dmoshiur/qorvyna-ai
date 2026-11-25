@@ -372,6 +372,26 @@ service cloud.firestore {
       allow read, write: if false; // admin inspects via server RPC only
     }
 
+    // --- AgentOps telemetry, governance & evaluations (server-gated only) ---------
+    match /agentops_executions/{id} {
+      allow read, write: if false; // accessed strictly via authenticated /api/agentops/*
+    }
+    match /agentops_audit/{id} {
+      allow read, write: if false; // immutable append-only via server governance
+    }
+    match /agentops_spans/{id} {
+      allow read, write: if false;
+    }
+    match /agentops_datasets/{id} {
+      allow read, write: if false;
+    }
+    match /agentops_runs/{id} {
+      allow read, write: if false;
+    }
+    match /agentops_memory/{id} {
+      allow read, write: if false;
+    }
+
     // --- Default deny --------------------------------------------------------------
     match /{document=**} {
       allow read, write: if false;

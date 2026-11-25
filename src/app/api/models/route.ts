@@ -6,6 +6,7 @@ import { qorvynaModelRoute, qorvynaModelStatus } from "@/lib/ai/config";
 import { QORVYNA_MODEL } from "@/lib/ai/model";
 import { providerPublicCode } from "@/lib/ai/provider-error";
 import { MAX_ACTIVE_MODELS, getPoolPreference, listModelStatus, setPoolPreference } from "@/lib/ai/models/pool";
+import { providerLatencyStats } from "@/lib/ai/provider-latency";
 import { mutationCsrfResponse } from "@/lib/server/request-security";
 
 export const runtime = "nodejs";
@@ -56,6 +57,7 @@ export async function GET(request: Request) {
     pool,
     max_active: MAX_ACTIVE_MODELS,
     reveal_mode: settings?.data()?.stream_reveal_mode ?? "adaptive",
+    provider_telemetry: providerLatencyStats(),
   }, { headers: { "Cache-Control": "private, no-store" } });
 }
 
