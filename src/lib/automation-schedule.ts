@@ -46,3 +46,37 @@ export function nextAutomationRun(options: { preset: SchedulePreset; time: strin
   }
   throw new Error("SCHEDULE_NO_OCCURRENCE");
 }
+
+/**
+ * Compute the next scheduled run (strictly after `after`) for an automation
+ * document, or null when the automation is not schedule-triggered. Pure and
+ * Db-free so the same logic can be reused by serialization and by tests, and so
+ * an active automation can never advertise a next-run in the past (review P0-2).
+ */
+export function computeNextRunAt(
+  data: {
+    trigger?: string | null;
+    schedule?: string | null;
+    time?: string;
+    timezone?: string;
+    schedule_weekday?: number;
+    created_at?: unknown;
+  },
+  after: number,
+): Date | null {
+  if (data.trigger !== "schedule" || !data.schedule) return null;
+  if (!["hourly", "daily", "weekly"].includes(data.schedule)) return null;
+  try {
+    return new Date(
+      nextAutomationRun({
+        preset: data.schedule as SchedulePreset,
+        time: String(data.time ?? "07:00"),
+        timezone: String(data.timezone ?? "UTC"),
+        weekday: Number(data.schedule_weekday ?? new Date(after).getUTCDay()),
+        after,
+      }),
+    );
+  } catch {
+    return null;
+  }
+}

@@ -34,6 +34,28 @@ export function ConversationActions({ conversationId }: { conversationId: string
     URL.revokeObjectURL(a.href);
   }
 
+  async function exportMarkdown() {
+    const messages = await rpc<{ role: string; content: string; created_at: string }[]>("conversation_messages", { conversation_id: conversationId }).catch(() => []);
+    const lines = [`# Chat export`, ``, `_Exported ${new Date().toISOString()}_`, ``];
+    for (const m of messages) {
+      const heading = m.role === "user" ? "## You" : "## Assistant";
+      lines.push(heading, "", m.content.trim(), "", "");
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `qorvyna-chat-${conversationId.slice(0, 8)}.md`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function rename() {
+    const next = await dialogs.prompt({ title: "Rename conversation", label: "New title" });
+    if (next == null) return;
+    await rpc("conversation_update", { id: conversationId, title: next }).catch(() => {});
+    router.refresh();
+  }
+
   return (
     <div className="relative shrink-0">
       <button
@@ -49,6 +71,8 @@ export function ConversationActions({ conversationId }: { conversationId: string
         <>
           <button type="button" className="fixed inset-0 z-10 cursor-default" aria-hidden="true" onClick={() => setMenu(false)} />
           <div className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-xl border border-border bg-surface shadow-lg">
+            <button type="button" onClick={() => { setMenu(false); void rename(); }} className="block w-full px-4 py-2.5 text-left text-sm text-ink-2 hover:bg-bg">Rename</button>
+            <button type="button" onClick={() => { setMenu(false); void exportMarkdown(); }} className="block w-full px-4 py-2.5 text-left text-sm text-ink-2 hover:bg-bg">Export Markdown</button>
             <button type="button" onClick={() => { setMenu(false); void exportJson(); }} className="block w-full px-4 py-2.5 text-left text-sm text-ink-2 hover:bg-bg">Export JSON</button>
             <button type="button" onClick={() => { setMenu(false); void archive(); }} className="block w-full px-4 py-2.5 text-left text-sm text-ink-2 hover:bg-bg">Archive</button>
             <button type="button" onClick={() => { setMenu(false); void remove(); }} className="block w-full px-4 py-2.5 text-left text-sm text-danger hover:bg-danger-soft">Delete</button>

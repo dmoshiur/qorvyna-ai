@@ -472,7 +472,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
       if (!convId) {
         const created = await d.collection("conversations").add({
           user_id: user.uid,
-          title: message.replace(/\s+/g, " ").slice(0, 60),
+          title: deriveTitle(message),
           mode: "general",
           is_temporary: isTemporary,
           summary: "",
@@ -527,7 +527,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
     // execution authority to an omitted/General request.
     wantStream = requestedStream;
   } else {
-    const title = message.replace(/\s+/g, " ").slice(0, 60);
+    const title = deriveTitle(message);
     try {
       const created = await d.collection("conversations").add({
         user_id: user.uid,
@@ -809,7 +809,12 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
 
   const agentOpsExecId = `exec_${requestId}`;
   const agentOpsRootId = getServerAgentOps().rootAgentId(agentOpsExecId);
-  void agentOpsStart({
+  // Await the start so the execution record is created and persisted BEFORE the
+  // response is returned. Fire-and-forget here is unsafe on serverless runtimes
+  // (Vercel): an unawaited persist can be frozen/killed when the handler returns,
+  // leaving agentops_executions empty — the P0-1 symptom where the dashboard
+  // records nothing despite a successful chat.
+  await agentOpsStart({
     executionId: agentOpsExecId,
     requestId,
     userId: user.uid,
@@ -1083,7 +1088,9 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
             stream_status: "complete",
             ...(degraded ? { storage_degraded: true } : {}),
           });
-          void agentOpsHandle([
+          // Await the terminal event so the "completed" execution is persisted
+          // before the stream closes (serverless fire-and-forget safety).
+          await agentOpsHandle([
             {
               type: "step.done",
               executionId: agentOpsExecId,
@@ -1108,7 +1115,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
           ]);
         } catch (e) {
           const msg = e instanceof Error ? e.message : "stream error";
-          void agentOpsHandle([
+          await agentOpsHandle([
             {
               type: "error",
               executionId: agentOpsExecId,
@@ -1291,7 +1298,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
   } catch (error) {
     logProviderFailure(error, requestId);
     await logUsage(d, user.uid, activeTarget?.model ?? selectedModel, "chat", {}, Date.now() - started, "error", requestId);
-    void agentOpsHandle([
+    await agentOpsHandle([
       {
         type: "error",
         executionId: agentOpsExecId,
@@ -1347,7 +1354,9 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
     finalizeFailed = true;
     logGatewayFailure("finalize_chat", { requestId, conversationId: convId }, error);
   }
-  void agentOpsHandle([
+  // Await the terminal event so the "completed" execution is persisted before
+  // the JSON response is returned (serverless fire-and-forget safety).
+  await agentOpsHandle([
     {
       type: "step.done",
       executionId: agentOpsExecId,
@@ -1594,12 +1603,43 @@ async function handleScan(_d: Db, _user: SessionUser, body: Record<string, unkno
 // Public status reports configuration only. It must never consume inference
 // quota, and configuration is not proof that a provider is available.
 // ---------------------------------------------------------------------------
+/** Derive a conversation title from the first user message. Short utterances
+ * ("hi", "ok") fall back to a generic title so the history list does not become
+ * five rows titled "hi" (review P1-2). */
+function deriveTitle(message: string): string {
+  const cleaned = message.replace(/\s+/g, " ").trim();
+  if (cleaned.length >= 6) return cleaned.slice(0, 60);
+  return "New chat";
+}
+
 async function handleHealth(mode: ChatMode = "general") {
   let d: Db | null = null;
   try { d = adminDb(); } catch { /* environment-only configuration */ }
-  const targets = await createAIRoutesFromDb(d);
+  const targets = await createAIRoutesFromDb(d, mode === "agent");
   if (!targets.length) return json({ status: "unconfigured", mode }, 503);
-  return json({ status: "unknown", mode, provider: targets[0].provider, chat_model: targets[0].model });
+  const target = targets[0];
+  // Configuration alone is not evidence of liveness. Run the provider's real
+  // 1-token probe (TTL-cached per provider+model via provider-health.ts) so the
+  // admin badge and sidebar popover reflect an actual inference round-trip
+  // instead of a permanently-"Unknown" status (review P0-3).
+  const probeStarted = Date.now();
+  let ok = false;
+  try {
+    ok = await target.client.healthCheck();
+  } catch {
+    ok = false;
+  }
+  const latencyMs = Date.now() - probeStarted;
+  return json(
+    {
+      status: ok ? "online" : "unavailable",
+      mode,
+      provider: target.provider,
+      chat_model: target.model,
+      probe_ms: latencyMs,
+    },
+    ok ? 200 : 503,
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import {
   type MultiFactorResolver,
 } from "firebase/auth";
 import { TotpMultiFactorGenerator } from "firebase/auth";
+import { Bot, ShieldCheck, Sparkles } from "lucide-react";
 import { fbAuth, firebaseBrowserConfigured } from "@/lib/firebase/client";
 import { describeAuthError } from "@/lib/firebase/auth-errors";
 import { MAX_AGE, MIN_AGE, isValidEmail } from "@/lib/utils";
@@ -56,8 +57,34 @@ export function AuthUnavailable() {
 export function LoginScreen() {
   return (
     <AuthShell>
+      <MarketingStrip />
       <LoginForm />
     </AuthShell>
+  );
+}
+
+/** A short product overview so first-touch visitors get a pitch before the
+ * login card — feature tiles + a call-out (review P2-1). */
+function MarketingStrip() {
+  const tiles = [
+    { icon: Sparkles, title: "Multi-model AI", body: "Chat, study and research with automatic model routing." },
+    { icon: Bot, title: "Agents that build", body: "Plan, write, validate and deploy real projects." },
+    { icon: ShieldCheck, title: "Governed by design", body: "Tool approvals, audit trails and a live circuit breaker." },
+  ];
+  return (
+    <section aria-label="QORVYNA overview" className="mb-7 w-full max-w-3xl">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+        {tiles.map((tile) => (
+          <div key={tile.title} className="rounded-xl border border-border bg-surface-2 px-3.5 py-3">
+            <div className="flex items-center gap-2">
+              <tile.icon size={15} className="text-accent" strokeWidth={1.8} />
+              <span className="text-[13px] font-semibold text-ink">{tile.title}</span>
+            </div>
+            <p className="mt-1 text-[11.5px] leading-snug text-ink-2">{tile.body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

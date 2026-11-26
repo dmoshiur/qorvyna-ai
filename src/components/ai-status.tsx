@@ -17,11 +17,11 @@ const CHECK_TIMEOUT_MS = 6_000;
 type AiState = "unknown" | "checking" | "online" | "unavailable" | "not-configured";
 
 const LABEL: Record<AiState, string> = {
-  unknown: "Check AI status",
+  unknown: "AI status",
   checking: "Checking…",
-  online: "AI Online",
-  unavailable: "AI Unavailable",
-  "not-configured": "AI not configured",
+  online: "AI online",
+  unavailable: "AI down",
+  "not-configured": "AI off",
 };
 
 let lastSuccess = 0;
@@ -34,8 +34,9 @@ export function reportSuccessfulAiResponse(): void {
 
 async function probe(): Promise<AiState> {
   try {
-    // Chat and Agent can have different configured routes. Neither a failed
-    // chat-model probe nor a successful one says anything about Agent readiness.
+    // Chat and Agent can have different configured routes. A probe now runs a
+    // real 1-token completion server-side (TTL-cached), so "online"/"unavailable"
+    // are live results rather than static "unknown".
     let configured = false;
     for (const mode of ["general", "agent"] as const) {
       const res = await fetch("/api/ai", {
@@ -45,8 +46,11 @@ async function probe(): Promise<AiState> {
         signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
       });
       const data = (await res.json().catch(() => ({}))) as { status?: string };
-      if (res.ok && data.status === "unknown") configured = true;
-      else if (data.status !== "unconfigured") return "unavailable";
+      if (data.status === "unconfigured") continue;
+      if (data.status === "online") configured = true;
+      else if (data.status === "unavailable") return "unavailable";
+      // Legacy "unknown" (configuration present, no live probe) counts as configured.
+      else if (res.ok) configured = true;
     }
     if (Date.now() - lastSuccess < 30_000) return "online";
     return configured ? "unknown" : "not-configured";
@@ -91,7 +95,7 @@ export function AiStatus({ className }: { className?: string }) {
       title={state === "unavailable" ? "The AI service is unavailable — press to retry the check" : `Service status: ${LABEL[state]}`}
       aria-live="polite"
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10.5px] font-medium uppercase tracking-[0.14em] transition-colors",
+        "inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10.5px] font-medium tracking-wide transition-colors",
         state === "online" && "text-success",
         state === "unavailable" && "text-danger",
         (state === "checking" || state === "unknown") && "text-ink-3",

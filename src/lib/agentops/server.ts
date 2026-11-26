@@ -25,6 +25,7 @@ import {
 import type {
   AgentOpsEvent,
   AuditEntry,
+  ExecutionOutcome,
   ExecutionRecord,
   GovernanceAction,
 } from "./types";
@@ -123,6 +124,25 @@ export async function agentOpsHandle(events: AgentOpsEvent | AgentOpsEvent[]): P
   const list = Array.isArray(events) ? events : [events];
   for (const event of list) {
     await engine.handle(event).catch(() => {});
+  }
+}
+
+/**
+ * Finalize a chat/agent execution so it becomes terminal ("completed",
+ * "failed" or "circuit_open"). Without this call an execution is started and
+ * instrumented but never closed, so it stays "running" forever and is never
+ * counted in the Live Monitor / economics dashboards — the P0-1 gap where the
+ * flagship dashboard records nothing. Fire-and-forget safe.
+ */
+export async function agentOpsEnd(input: {
+  executionId: string;
+  outcome: ExecutionOutcome;
+  status?: ExecutionRecord["status"];
+}): Promise<void> {
+  try {
+    await getServerAgentOps().end(input.executionId, input.outcome, input.status);
+  } catch {
+    /* telemetry must never break the chat response */
   }
 }
 
