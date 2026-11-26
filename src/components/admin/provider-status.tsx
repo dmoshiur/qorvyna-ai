@@ -35,6 +35,8 @@ function rowFor(label: string, value: string | undefined, detail = ""): Row {
       return { label, state: "down", detail: "Connection failed" };
     case "not-configured":
       return { label, state: "idle", detail: "Not configured" };
+    case "disabled":
+      return { label, state: "idle", detail: "Disabled by configuration" };
     default:
       return { label, state: "warn", detail: "Unknown" };
   }

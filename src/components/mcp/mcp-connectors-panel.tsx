@@ -8,11 +8,12 @@ import { Badge, Card } from "@/components/ui";
 interface ConnectorDescriptor {
   id: string;
   label: string;
+  provider: string;
   transport: string;
-  status: "ready" | "requires_user_auth" | "disabled_by_operator" | "not_configured";
-  readOnlyByDefault: boolean;
-  capabilities: string[];
+  operations: string[];
+  status: "ready" | "disabled" | "not_connected" | "not_configured";
   detail: string;
+  lastVerifiedAt: string | null;
 }
 
 export function McpConnectorsPanel() {
@@ -83,20 +84,31 @@ export function McpConnectorsPanel() {
                 key={c.id}
                 className="flex items-start justify-between gap-2 rounded-md border border-[var(--border)] p-2 text-xs"
               >
-                <div>
+                <div className="min-w-0">
                   <div className="font-medium">{c.label}</div>
                   <div className="text-[11px] text-[var(--fg-muted)]">{c.detail}</div>
+                  {c.lastVerifiedAt ? (
+                    <div className="mt-0.5 text-[10.5px] text-[var(--fg-muted)]">
+                      verified {new Date(c.lastVerifiedAt).toLocaleString()}
+                    </div>
+                  ) : null}
                 </div>
                 <Badge
                   tone={
                     c.status === "ready"
                       ? "success"
-                      : c.status === "requires_user_auth"
+                      : c.status === "not_connected" || c.status === "disabled"
                         ? "warning"
                         : "neutral"
                   }
                 >
-                  {c.status.replace(/_/g, " ")}
+                  {c.status === "ready"
+                    ? "ready"
+                    : c.status === "not_connected"
+                      ? "needs connection"
+                      : c.status === "disabled"
+                        ? "disabled"
+                        : "not configured"}
                 </Badge>
               </div>
             ))}

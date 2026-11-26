@@ -17,12 +17,43 @@ import { cn } from "@/lib/utils";
 import { QORVYNA_MODEL_LABEL, isQorvynaModelId } from "@/lib/ai/model";
 import { modelLabel } from "@/lib/ai/models/registry";
 
+// Provider display labels for the response badge. Only providers that are part
+// of this single-model deployment are named explicitly; anything else is
+// Title-Cased at runtime. (The codebase intentionally avoids naming other
+// model families — see the single-model policy test.)
+const PROVIDER_DISPLAY: Record<string, string> = {
+  groq: "Groq",
+  // Reported garble from the live review ("Greq") — normalize to the real brand.
+  greq: "Groq",
+  openai: "OpenAI",
+  together: "Together",
+  cloudflare: "Cloudflare",
+  google: "Google",
+  mistral: "Mistral",
+  qwen: "Qwen",
+  replicate: "Replicate",
+  azure: "Azure OpenAI",
+};
+
+/** Map a provider id to a clean display label, never emitting a garbled token
+ * such as "Greq". Unknown ids are Title-Cased so the badge stays readable. */
+export function providerDisplay(provider?: string | null): string | null {
+  if (!provider) return null;
+  const key = provider.toLowerCase();
+  if (PROVIDER_DISPLAY[key]) return PROVIDER_DISPLAY[key];
+  const cleaned = provider.replace(/[^a-z0-9]/gi, "");
+  if (!cleaned) return null;
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
+}
+
 function displayModelBadge(model?: string | null, provider?: string | null, tier?: "high" | "low" | null): string | null {
+  const providerLabel = providerDisplay(provider);
   if (model) {
     const label = isQorvynaModelId(model) ? QORVYNA_MODEL_LABEL : modelLabel(model);
-    return provider ? `${provider} · ${label}` : label;
+    return providerLabel ? `${providerLabel} · ${label}` : label;
   }
-  return provider || (tier ? QORVYNA_MODEL_LABEL : null);
+  if (providerLabel) return providerLabel;
+  return tier ? QORVYNA_MODEL_LABEL : null;
 }
 
 function useElapsed(active: boolean) {

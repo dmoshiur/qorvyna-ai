@@ -151,6 +151,20 @@ export async function isImageGenerationConfigured(d: Db): Promise<boolean> {
   return (await resolveImageCredentials(d)) !== null;
 }
 
+export type ImageGenerationStatus = "online" | "disabled" | "not-configured";
+
+/**
+ * Distinguish an intentionally disabled image provider (a record exists with
+ * `enabled: false`) from one that was never provisioned, so the admin surface
+ * can show a deliberate "Disabled by configuration" state rather than a
+ * generic "Not configured" (review P0-3).
+ */
+export async function imageGenerationStatus(d: Db): Promise<ImageGenerationStatus> {
+  const record = await readRecord(d).catch(() => ({}) as StoredRecord);
+  if (record.enabled === false) return "disabled";
+  return (await resolveImageCredentials(d)) ? "online" : "not-configured";
+}
+
 /** Admin-facing config view. Never includes the key. */
 export async function getImageProviderConfigPublic(d: Db): Promise<PublicImageProviderConfig> {
   const record = await readRecord(d);

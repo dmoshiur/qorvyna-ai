@@ -133,6 +133,14 @@ export function ModelsClient({ showChatLink = true }: { showChatLink?: boolean }
         <Button variant={pool.auto ? "secondary" : "primary"} disabled={pool.auto || saving === "auto"} onClick={() => void apply({ auto: true, enabled: [] }, "auto")}>{pool.auto ? "On" : "Use Auto"}</Button>
       </Card>
 
+      <p className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs text-ink-2">
+        <span className="font-medium text-ink">Auto routing rules —</span> QORVYNA inspects each message and picks the
+        best-fit model from the enabled pool: long or code-heavy prompts route to the larger models, short general
+        questions to the efficient ones, and requests that need tool use or a specific strength go to the model that
+        can serve them. Availability (provider key, quota and plan) is checked live, so a model that is temporarily
+        unavailable is skipped and the request is handed to the next best option automatically.
+      </p>
+
       <ul className="space-y-3">
         {data.models.map((model) => {
           const usable = model.availability === "available";

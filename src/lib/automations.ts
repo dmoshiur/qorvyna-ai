@@ -50,6 +50,28 @@ export function isAutomationStatus(value: unknown): value is AutomationStatus {
   return typeof value === "string" && (AUTOMATION_STATUSES as readonly string[]).includes(value);
 }
 
+/**
+ * Enforce a human-readable automation name (review P2-6): non-empty, within
+ * bounds, contains at least one letter, and not a bare machine id such as
+ * "fsdhnf:KJA". Names are the primary label on the Automations surface, so a
+ * random token must not be persisted as a first-class card.
+ */
+export function validateAutomationName(raw: string): string {
+  const name = raw.trim().replace(/\s+/g, " ");
+  if (name.length < 2 || name.length > 80) {
+    throw new Error("Automation name must be 2–80 characters.");
+  }
+  if (!/[A-Za-z]/.test(name)) {
+    throw new Error("Automation name must contain at least one letter.");
+  }
+  // Reject machine-id style names: a short lowercase/digit prefix followed by
+  // a colon and a short uppercase or hex suffix (e.g. "fsdhnf:KJA").
+  if (/^[a-z0-9]{2,8}:(?:[A-Z0-9]{2,8}|[a-f0-9]{2,8})$/.test(name)) {
+    throw new Error("Automation name looks like a machine id — use a readable name.");
+  }
+  return name;
+}
+
 export const MAX_AUTOMATION_ACTIONS = 5;
 export const MAX_AUTOMATION_NAME = 80;
 

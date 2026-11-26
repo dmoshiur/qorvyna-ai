@@ -32,6 +32,9 @@ export type McpConnectorDescriptor = {
   operations: string[];
   status: McpConnectorStatus;
   detail: string;
+  /** ISO timestamp of the last time this connector was verified reachable/ready
+   * — surfaces an operational status rather than a static roadmap (review P1-4). */
+  lastVerifiedAt: string | null;
 };
 
 export async function listMcpConnectors(db: Db, user: SessionUser): Promise<McpConnectorDescriptor[]> {
@@ -57,6 +60,7 @@ export async function listMcpConnectors(db: Db, user: SessionUser): Promise<McpC
       operations: ["list_project_files", "read_project_file"],
       status: "ready",
       detail: "Owner-scoped read-only inspection of Firestore project files.",
+      lastVerifiedAt: new Date().toISOString(),
     },
     {
       id: "github_mcp",
@@ -74,6 +78,7 @@ export async function listMcpConnectors(db: Db, user: SessionUser): Promise<McpC
         : ghConn
           ? `Connected as @${ghConn.login}; single-use approval & guardian policy enforced.`
           : "Connect your GitHub account in Settings or Project Workspace first.",
+      lastVerifiedAt: ghConn?.connectedAt ?? null,
     },
     {
       id: "google_drive_mcp",
@@ -89,6 +94,7 @@ export async function listMcpConnectors(db: Db, user: SessionUser): Promise<McpC
       detail: !driveConfigured
         ? "Not configured on this deployment (requires verified Google OAuth app credentials and consent review)."
         : "Opt-in personal connector; requires explicit user OAuth grant and guardian consent for minors.",
+      lastVerifiedAt: null,
     },
     {
       id: "gmail_mcp",
@@ -104,6 +110,7 @@ export async function listMcpConnectors(db: Db, user: SessionUser): Promise<McpC
       detail: !gmailConfigured
         ? "Not configured on this deployment (requires verified Gmail read-only OAuth scope and security review)."
         : "Opt-in personal connector; requires explicit user OAuth grant and guardian consent for minors.",
+      lastVerifiedAt: null,
     },
   ];
 }

@@ -611,7 +611,7 @@ const ACTIONS: Record<string, Handler> = {
   // --- Automations (actions only reference registry tools; LOW-risk only) -----
   automation_create: (d, u, b) =>
     automations.createAutomation(d, u, {
-      name: z.string().min(2).max(80).parse(b.name),
+      name: automations.validateAutomationName(z.string().min(2).max(120).parse(b.name)),
       description: b.description ? str(b.description) : undefined,
       trigger: str(b.trigger),
       schedule: b.schedule ? str(b.schedule) : null,
@@ -626,7 +626,7 @@ const ACTIONS: Record<string, Handler> = {
     return { configured: (process.env.AUTOMATION_WORKER_SECRET?.trim().length ?? 0) >= 32, last_success_at: value?.toDate?.().toISOString() ?? null };
   },
   automation_runs_list: (d, u, b) => automations.listAutomationRuns(d, u, b.id ? z.string().max(128).parse(b.id) : undefined),
-  automation_update: (d, u, b) => automations.updateAutomation(d, u, z.string().min(1).max(128).parse(b.id), { name: z.string().min(2).max(80).parse(b.name), description: str(b.description), trigger: str(b.trigger), schedule: b.schedule ? str(b.schedule) : null, actions: b.actions, time: b.time ? str(b.time) : undefined, timezone: b.timezone ? str(b.timezone) : undefined }),
+  automation_update: (d, u, b) => automations.updateAutomation(d, u, z.string().min(1).max(128).parse(b.id), { name: automations.validateAutomationName(z.string().min(2).max(120).parse(b.name)), description: str(b.description), trigger: str(b.trigger), schedule: b.schedule ? str(b.schedule) : null, actions: b.actions, time: b.time ? str(b.time) : undefined, timezone: b.timezone ? str(b.timezone) : undefined }),
   automation_status: (d, u, b) =>
     automations.setAutomationStatus(d, u, z.string().min(1).parse(b.id), z.enum(["active", "paused", "disabled"]).parse(b.status)),
   automation_delete: (d, u, b) => automations.deleteAutomation(d, u, z.string().min(1).parse(b.id)),

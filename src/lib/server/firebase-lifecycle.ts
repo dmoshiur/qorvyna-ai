@@ -13,50 +13,56 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { nowTs, type Db } from "@/lib/firebase/admin";
 
-export type CollectionProbe = {
+export type CollectionLifecycle = {
   collection: string;
+  category: string;
+  retentionPolicy: string;
+  sampledCount: number;
+  sampleCapped: boolean;
+  staleSampledCount: number;
   reachable: boolean;
-  sampleCount: number;
-  cappedAt: number;
-  expiredInSample?: number;
 };
 
 export type LifecycleSnapshot = {
-  checkedAt: string;
-  collections: CollectionProbe[];
+  generatedAt: string;
+  collections: CollectionLifecycle[];
   maintenanceWorker: {
     lastRunAt: string | null;
+    healthy: boolean;
     errors: string[];
   };
-  backupVerification: {
-    verified: boolean;
-    lastVerifiedAt: string | null;
-    manifestId: string | null;
-    targetEnvironment: string | null;
-    note: string;
-  };
+  lastVerifiedBackup: {
+    manifestId: string;
+    verifiedAt: string;
+    verifiedBy: string;
+    collectionCount: number;
+    sha256: string;
+  } | null;
 };
 
 const SAMPLE_CAP = 50;
 
 export async function inspectFirebaseLifecycle(db: Db, now = Date.now()): Promise<LifecycleSnapshot> {
+  // Each entry carries the governance metadata the admin UI renders (review P0-4):
+  // the table must show a real Category / Retention Policy per collection rather
+  // than blank cells.
   const canonical = [
-    { name: "profiles", ttlField: null },
-    { name: "conversations", ttlField: null },
-    { name: "projects", ttlField: null },
-    { name: "agent_tasks", ttlField: null },
-    { name: "execution_sessions", ttlField: "heartbeat_at" },
-    { name: "tool_approvals", ttlField: "expires_at" },
-    { name: "provider_quota_windows", ttlField: "expire_at" },
-    { name: "agentops_executions", ttlField: null },
-    { name: "agentops_audit", ttlField: null },
+    { name: "profiles", ttlField: null, category: "Account", retentionPolicy: "Retained until account deletion" },
+    { name: "conversations", ttlField: null, category: "Conversation", retentionPolicy: "Active 90 days, then pruned" },
+    { name: "projects", ttlField: null, category: "Generated project", retentionPolicy: "Retained until owner deletes" },
+    { name: "agent_tasks", ttlField: null, category: "Agent task", retentionPolicy: "30-day active window" },
+    { name: "execution_sessions", ttlField: "heartbeat_at", category: "Observability", retentionPolicy: "Heartbeat TTL · 30-day expiry" },
+    { name: "tool_approvals", ttlField: "expires_at", category: "Governance", retentionPolicy: "Approval expires in 24h" },
+    { name: "provider_quota_windows", ttlField: "expire_at", category: "Quota", retentionPolicy: "Sliding hourly window" },
+    { name: "agentops_executions", ttlField: null, category: "Observability", retentionPolicy: "30-day AgentOps retention" },
+    { name: "agentops_audit", ttlField: null, category: "Audit", retentionPolicy: "Immutable · 1-year retention" },
   ] as const;
 
-  const collections: CollectionProbe[] = [];
+  const collections: CollectionLifecycle[] = [];
   for (const item of canonical) {
     try {
       const snap = await db.collection(item.name).limit(SAMPLE_CAP).get();
-      let expiredInSample: number | undefined;
+      let expiredInSample = 0;
       if (item.ttlField) {
         expiredInSample = snap.docs.filter((doc) => {
           const val = doc.data()?.[item.ttlField];
@@ -68,17 +74,22 @@ export async function inspectFirebaseLifecycle(db: Db, now = Date.now()): Promis
       }
       collections.push({
         collection: item.name,
+        category: item.category,
+        retentionPolicy: item.retentionPolicy,
+        sampledCount: snap.docs.length,
+        sampleCapped: snap.docs.length >= SAMPLE_CAP,
+        staleSampledCount: expiredInSample,
         reachable: true,
-        sampleCount: snap.docs.length,
-        cappedAt: SAMPLE_CAP,
-        ...(expiredInSample !== undefined ? { expiredInSample } : {}),
       });
     } catch {
       collections.push({
         collection: item.name,
+        category: item.category,
+        retentionPolicy: item.retentionPolicy,
+        sampledCount: 0,
+        sampleCapped: false,
+        staleSampledCount: 0,
         reachable: false,
-        sampleCount: 0,
-        cappedAt: SAMPLE_CAP,
       });
     }
   }
@@ -95,35 +106,40 @@ export async function inspectFirebaseLifecycle(db: Db, now = Date.now()): Promis
   } catch {
     /* best-effort */
   }
+  // The worker is "healthy" only when it has reported recently and without
+  // errors; otherwise the UI surfaces a "Needs Cron Check" state instead of a
+  // misleading green badge (review P0-4).
+  const workerHealthy =
+    lastRunAt !== null &&
+    workerErrors.length === 0 &&
+    Date.now() - new Date(lastRunAt).getTime() <= 48 * 3_600_000;
 
-  let backupVerification: LifecycleSnapshot["backupVerification"] = {
-    verified: false,
-    lastVerifiedAt: null,
-    manifestId: null,
-    targetEnvironment: null,
-    note: "No verified staging restore drill recorded yet. Follow docs/BACKUP_AND_RECOVERY.md.",
-  };
+  let lastVerifiedBackup: LifecycleSnapshot["lastVerifiedBackup"] = null;
   try {
     const bk = await db.collection("system_settings").doc("backup_verification").get();
     if (bk.exists) {
       const d = bk.data()!;
-      backupVerification = {
-        verified: Boolean(d.verified),
-        lastVerifiedAt: d.verified_at?.toDate?.()?.toISOString?.() ?? (typeof d.verified_at === "string" ? d.verified_at : null),
-        manifestId: typeof d.manifest_id === "string" ? d.manifest_id : null,
-        targetEnvironment: typeof d.target_environment === "string" ? d.target_environment : null,
-        note: typeof d.note === "string" ? d.note : backupVerification.note,
-      };
+      if (d.verified) {
+        lastVerifiedBackup = {
+          manifestId: typeof d.manifest_id === "string" ? d.manifest_id : "unknown",
+          verifiedAt:
+            d.verified_at?.toDate?.()?.toISOString?.() ?? (typeof d.verified_at === "string" ? d.verified_at : ""),
+          verifiedBy: typeof d.verified_by === "string" ? d.verified_by : "unknown",
+          collectionCount:
+            d.collections && typeof d.collections === "object" ? Object.keys(d.collections).length : 0,
+          sha256: typeof d.sha256 === "string" ? d.sha256 : "",
+        };
+      }
     }
   } catch {
     /* best-effort */
   }
 
   return {
-    checkedAt: new Date(now).toISOString(),
+    generatedAt: new Date(now).toISOString(),
     collections,
-    maintenanceWorker: { lastRunAt, errors: workerErrors },
-    backupVerification,
+    maintenanceWorker: { lastRunAt, healthy: workerHealthy, errors: workerErrors },
+    lastVerifiedBackup,
   };
 }
 

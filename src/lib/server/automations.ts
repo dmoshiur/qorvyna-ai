@@ -4,7 +4,9 @@ import { Timestamp } from "firebase-admin/firestore";
 import { adminAuth, nowTs, type Db } from "@/lib/firebase/admin";
 import type { SessionUser } from "@/lib/firebase/session";
 import { RpcError } from "@/lib/server/errors";
-import { MAX_AUTOMATION_NAME, validateAutomationActions, isAutomationTrigger, isSchedulePreset, type Automation, type AutomationAction } from "@/lib/automations";
+import { MAX_AUTOMATION_NAME, validateAutomationActions, validateAutomationName, isAutomationTrigger, isSchedulePreset, type Automation, type AutomationAction } from "@/lib/automations";
+// Re-export so the RPC layer can enforce naming without importing the client module directly.
+export { validateAutomationName };
 import { nextAutomationRun, validTimezone } from "@/lib/automation-schedule";
 import { RiskTier, toolRegistry, type ToolResult } from "@/lib/ai/tools/registry";
 import { executeAgentTool } from "@/lib/server/tool-gateway";
@@ -45,8 +47,26 @@ function nextDue(data: Record<string, unknown>, after: number): Timestamp | null
     return Timestamp.fromMillis(nextAutomationRun({ preset: data.schedule, time: String(data.time ?? "07:00"), timezone: String(data.timezone ?? "UTC"), weekday: Number(data.schedule_weekday ?? new Date(iso(data.created_at) || after).getUTCDay()), after }));
   } catch { throw new RpcError("SCHEDULE_INVALID"); }
 }
+/** Ensure an active scheduled automation never reports a next-run in the past.
+ * If the stored value is missing or stale (e.g. a manual run left it behind),
+ * recompute a strict-future occurrence relative to now (review P0-2). */
+function serializeNextRun(data: Record<string, unknown>): string | null {
+  if (data.trigger !== "schedule" || !isSchedulePreset(data.schedule) || data.status !== "active") {
+    return iso(data.next_run_at) || null;
+  }
+  const stored = iso(data.next_run_at);
+  const storedMs = stored ? new Date(stored).getTime() : NaN;
+  if (Number.isFinite(storedMs) && storedMs >= Date.now()) return stored;
+  try {
+    const recomputed = nextDue(data, Date.now());
+    return recomputed ? recomputed.toDate().toISOString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function serialize(id: string, data: Record<string, unknown>): Automation {
-  return { id, user_id: String(data.user_id ?? ""), name: String(data.name ?? ""), description: String(data.description ?? ""), trigger: String(data.trigger ?? "manual") as Automation["trigger"], schedule: (data.schedule as Automation["schedule"]) ?? null, actions: (data.actions as AutomationAction[]) ?? [], status: String(data.status ?? "active") as Automation["status"], last_run_at: iso(data.last_run_at) || null, last_run_ok: typeof data.last_run_ok === "boolean" ? data.last_run_ok : null, run_count: Number(data.run_count ?? 0), created_at: iso(data.created_at), updated_at: iso(data.updated_at), time: String(data.time ?? "07:00"), timezone: String(data.timezone ?? "UTC"), next_run_at: iso(data.next_run_at) || null };
+  return { id, user_id: String(data.user_id ?? ""), name: String(data.name ?? ""), description: String(data.description ?? ""), trigger: String(data.trigger ?? "manual") as Automation["trigger"], schedule: (data.schedule as Automation["schedule"]) ?? null, actions: (data.actions as AutomationAction[]) ?? [], status: String(data.status ?? "active") as Automation["status"], last_run_at: iso(data.last_run_at) || null, last_run_ok: typeof data.last_run_ok === "boolean" ? data.last_run_ok : null, run_count: Number(data.run_count ?? 0), created_at: iso(data.created_at), updated_at: iso(data.updated_at), time: String(data.time ?? "07:00"), timezone: String(data.timezone ?? "UTC"), next_run_at: serializeNextRun(data) };
 }
 export async function createAutomation(d: Db, user: SessionUser, input: Definition): Promise<Automation> {
   const definition = validateDefinition(input);
@@ -104,7 +124,9 @@ export async function runAutomation(d: Db, user: SessionUser, id: string, opts: 
       const due = (data.next_run_at as Timestamp | undefined)?.toMillis?.() ?? Infinity;
       if (data.trigger !== "schedule" || due > nowMs) throw new RpcError("AUTOMATION_NOT_DUE", 409);
     }
-    tx.set(ref, { lease_until: Timestamp.fromMillis(nowMs + LEASE_MS), lease_token: leaseToken, ...(opts.scheduled ? { next_run_at: nextDue(data, nowMs) } : {}) }, { merge: true });
+    // Recompute the next scheduled occurrence after every run — manual runs
+    // previously left next_run_at pointing at a stale (past) instant (review P0-2).
+    tx.set(ref, { lease_until: Timestamp.fromMillis(nowMs + LEASE_MS), lease_token: leaseToken, next_run_at: nextDue(data, nowMs) }, { merge: true });
   });
   const actions = (data.actions as AutomationAction[]) ?? [];
   const requestId = `auto_${leaseToken}`;

@@ -418,6 +418,29 @@ export function AgentOpsControlCenter() {
     }
   }
 
+  async function seedStarterDatasets() {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch("/api/agentops/evaluations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "seed_starter_datasets" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || "Could not load starter datasets");
+      setBanner({
+        tone: "success",
+        text: `Loaded ${data.created?.length ?? 0} starter evaluation dataset(s). Pick one to run.`,
+      });
+      await loadEvaluations();
+    } catch (err) {
+      setBanner({ tone: "danger", text: err instanceof Error ? err.message : "Starter datasets failed" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runLiveEvaluation() {
     if (!selectedDatasetId) return;
     setBusy(true);
@@ -521,8 +544,8 @@ export function AgentOpsControlCenter() {
         </Alert>
       ) : null}
 
-      {/* Real-time KPI summary strip */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      {/* Real-time KPI summary strip — 2 columns even on mobile (P2-5) */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <Card className="!p-4">
           <p className="text-xs font-medium text-ink-3">Observed Executions</p>
           <p className="mt-1 text-2xl font-semibold text-ink">{metrics?.executions ?? 0}</p>
@@ -1486,7 +1509,10 @@ export function AgentOpsControlCenter() {
                 placeholder={"One test case per line: Prompt => optional expected substring\nExample: Return the sum of 14 and 28 => 42"}
                 className="input-base w-full font-mono text-xs"
               />
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => void seedStarterDatasets()} disabled={busy}>
+                  Load starter datasets
+                </Button>
                 <Button onClick={() => void createDataset()} disabled={busy}>
                   Save Dataset
                 </Button>

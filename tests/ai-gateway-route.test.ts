@@ -225,14 +225,24 @@ describe("AI gateway — failure handling (regression: the old generic 500s are 
   });
 });
 
-describe("AI gateway — public health does not consume inference", () => {
-  it("reports unknown, not online, without calling the provider", async () => {
+describe("AI gateway — public health runs a real cached probe", () => {
+  it("reports unavailable when the provider probe fails", async () => {
     resetHealthCacheForTests();
     stubHolder.current = { kind: "status", status: 401 };
     const callsBefore = providerCalls.length;
     const result = await post({ action: "health" });
+    expect(result.status).toBe(503);
+    expect(result.json?.status).toBe("unavailable");
+    // The 1-token probe IS a real provider call (TTL-cached), so a failing
+    // provider is reported as unavailable rather than a false "unknown".
+    expect(providerCalls.length).toBeGreaterThan(callsBefore);
+  });
+
+  it("reports online when the provider probe succeeds", async () => {
+    resetHealthCacheForTests();
+    stubHolder.current = { kind: "ok", content: "PROBE-OK" };
+    const result = await post({ action: "health" });
     expect(result.status).toBe(200);
-    expect(result.json?.status).toBe("unknown");
-    expect(providerCalls.length).toBe(callsBefore);
+    expect(result.json?.status).toBe("online");
   });
 });

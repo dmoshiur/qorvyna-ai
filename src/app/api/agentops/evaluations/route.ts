@@ -30,6 +30,44 @@ import type {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** Built-in starter evaluation datasets (review P1-5). Each is small, deterministic
+ * and maps to a headline capability so the Economics tab is usable on first open
+ * without manual data entry. Ids are stable so re-seeding is idempotent. */
+const STARTER_DATASETS: Array<{ id: string; name: string; description: string; cases: Array<{ prompt: string; expectedOutcome?: string; tags: string[] }> }> = [
+  {
+    id: "starter_arithmetic",
+    name: "Arithmetic & reasoning",
+    description: "Basic arithmetic and multi-step reasoning — a deterministic baseline for correctness.",
+    cases: [
+      { prompt: "Return the sum of 14 and 28. Reply with the number only.", expectedOutcome: "42", tags: ["arithmetic", "basic"] },
+      { prompt: "What is 17 times 6? Reply with the number only.", expectedOutcome: "102", tags: ["arithmetic", "basic"] },
+      { prompt: "A bag holds 3 apples. If you add 4 more, then eat 2, how many remain? Reply with the number only.", expectedOutcome: "5", tags: ["arithmetic", "reasoning"] },
+      { prompt: "Return 100 divided by 8 as a decimal. Reply with the number only.", expectedOutcome: "12.5", tags: ["arithmetic", "decimal"] },
+      { prompt: "If a train travels 60 km in 1.5 hours, its average speed in km/h is what? Reply with the number only.", expectedOutcome: "40", tags: ["arithmetic", "rate"] },
+    ],
+  },
+  {
+    id: "starter_json_extraction",
+    name: "JSON extraction",
+    description: "Extract structured fields from plain text into valid JSON — tests structured output reliability.",
+    cases: [
+      { prompt: 'From this sentence return JSON {"city": "...", "country": "..."}: "The capital of Bangladesh is Dhaka."', expectedOutcome: '{"city":"Dhaka","country":"Bangladesh"}', tags: ["json", "extraction"] },
+      { prompt: 'From this sentence return JSON {"name": "...", "age": <number>}: "Alice is 28 years old."', expectedOutcome: '{"name":"Alice","age":28}', tags: ["json", "extraction"] },
+      { prompt: 'From this sentence return JSON {"product": "...", "price": <number>}: "The laptop costs 1200 dollars."', expectedOutcome: '{"product":"laptop","price":1200}', tags: ["json", "extraction"] },
+    ],
+  },
+  {
+    id: "starter_codegen",
+    name: "Short code generation",
+    description: "Write a small, correct function — tests code correctness and safety on a minimal surface.",
+    cases: [
+      { prompt: "Write a Python function `add(a, b)` that returns the sum. Reply with only the code.", expectedOutcome: "def add(a, b):", tags: ["code", "python"] },
+      { prompt: "Write a JavaScript function that returns the length of a given array. Reply with only the code.", expectedOutcome: "function", tags: ["code", "javascript"] },
+      { prompt: "Write a Python one-liner using a list comprehension that squares every element of a list `x`. Reply with only the code.", expectedOutcome: "[i * i", tags: ["code", "python", "comprehension"] },
+    ],
+  },
+];
+
 function computeWorkflowEconomics(records: ExecutionRecord[]) {
   const byWorkflow = new Map<
     string,
@@ -238,6 +276,9 @@ const postSchema = z.discriminatedUnion("action", [
     cases: z.array(caseSchema).min(1).max(50),
   }),
   z.object({
+    action: z.literal("seed_starter_datasets"),
+  }),
+  z.object({
     action: z.literal("run_live"),
     datasetId: z.string().min(1).max(120),
     agentConfig: z.string().max(120).default("default"),
@@ -301,6 +342,32 @@ export async function POST(req: NextRequest) {
       };
       await storage.putDataset(dataset);
       return NextResponse.json({ ok: true, dataset });
+    }
+
+    if (body.action === "seed_starter_datasets") {
+      // Idempotent: only create a starter set that this user has not already
+      // created, so the Economics tab is usable on first open (review P1-5).
+      const existing = new Set((await storage.listDatasets()).map((d) => d.id));
+      const created: EvaluationDataset[] = [];
+      for (const starter of STARTER_DATASETS) {
+        if (existing.has(starter.id)) continue;
+        const dataset: EvaluationDataset = {
+          id: starter.id,
+          name: starter.name,
+          description: starter.description,
+          createdBy: user.uid,
+          createdAt: Date.now(),
+          cases: starter.cases.map((c, idx) => ({
+            id: `case_${idx + 1}`,
+            prompt: c.prompt,
+            expectedOutcome: c.expectedOutcome,
+            tags: c.tags,
+          })),
+        };
+        await storage.putDataset(dataset);
+        created.push(dataset);
+      }
+      return NextResponse.json({ ok: true, created, datasets: await storage.listDatasets() });
     }
 
     const dataset = await storage.getDataset(body.datasetId);
