@@ -7,12 +7,19 @@ import { safeAgentPath, type AgentFile } from "@/lib/ai/agent";
 
 const API = "https://api.github.com";
 const CONNECTIONS = "github_connections";
+const VERIFY_TTL_MS = 5 * 60_000;
+
+export function canStoreGithubTokens(): boolean {
+  const key = env.github?.tokenEncryptionKey ?? "";
+  return isGithubConfigured() || (key.length >= 32 && !key.includes("replace-with"));
+}
 
 export type GithubConnection = {
   login: string;
   name: string;
   avatarUrl: string;
   connectedAt: string;
+  authMethod?: "oauth" | "pat";
 };
 
 function encryptionKey(): Buffer {
@@ -20,7 +27,7 @@ function encryptionKey(): Buffer {
 }
 
 export function encryptGithubToken(token: string): string {
-  if (!isGithubConfigured()) throw new Error("GITHUB_NOT_CONFIGURED");
+  if (!canStoreGithubTokens()) throw new Error("GITHUB_NOT_CONFIGURED");
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
@@ -29,7 +36,7 @@ export function encryptGithubToken(token: string): string {
 }
 
 export function decryptGithubToken(value: string): string {
-  if (!isGithubConfigured()) throw new Error("GITHUB_NOT_CONFIGURED");
+  if (!canStoreGithubTokens()) throw new Error("GITHUB_NOT_CONFIGURED");
   const [ivRaw, tagRaw, encryptedRaw] = value.split(".");
   if (!ivRaw || !tagRaw || !encryptedRaw) throw new Error("GITHUB_TOKEN_INVALID");
   const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivRaw, "base64url"));
@@ -45,7 +52,12 @@ function iso(value: unknown): string {
   return timestamp?.toDate?.().toISOString() ?? "";
 }
 
-export async function saveGithubConnection(uid: string, token: string, profile: { login: string; name?: string | null; avatar_url?: string | null }) {
+export async function saveGithubConnection(
+  uid: string,
+  token: string,
+  profile: { login: string; name?: string | null; avatar_url?: string | null },
+  authMethod: "oauth" | "pat" = "oauth",
+) {
   const ref = adminDb().collection(CONNECTIONS).doc(uid);
   const existing = await ref.get();
   const connectedAt = existing.data()?.connected_at ?? nowTs();
@@ -55,6 +67,8 @@ export async function saveGithubConnection(uid: string, token: string, profile: 
     login: profile.login,
     name: profile.name ?? "",
     avatar_url: profile.avatar_url ?? "",
+    auth_method: authMethod,
+    verified_at_ms: Date.now(),
     connected_at: connectedAt,
     updated_at: nowTs(),
   }, { merge: true });
@@ -69,7 +83,98 @@ export async function getGithubConnection(uid: string): Promise<GithubConnection
     name: String(data.name ?? ""),
     avatarUrl: String(data.avatar_url ?? ""),
     connectedAt: iso(data.connected_at),
+    ...(data.auth_method === "pat" || data.auth_method === "oauth" ? { authMethod: data.auth_method } : {}),
   };
+}
+
+export async function verifyGithubConnectionStatus(uid: string): Promise<{
+  connected: boolean;
+  connection: GithubConnection | null;
+  reauthorize?: boolean;
+  upstreamDegraded?: boolean;
+}> {
+  const ref = adminDb().collection(CONNECTIONS).doc(uid);
+  const doc = await ref.get();
+  if (!doc.exists) return { connected: false, connection: null };
+  const data = doc.data()!;
+  const connection: GithubConnection = {
+    login: String(data.login ?? ""),
+    name: String(data.name ?? ""),
+    avatarUrl: String(data.avatar_url ?? ""),
+    connectedAt: iso(data.connected_at),
+    ...(data.auth_method === "pat" || data.auth_method === "oauth" ? { authMethod: data.auth_method } : {}),
+  };
+
+  // Ensure the stored encrypted token is still decryptable under the current key.
+  try {
+    decryptGithubToken(String(data.access_token_encrypted ?? ""));
+  } catch {
+    return { connected: false, connection: null, reauthorize: true };
+  }
+
+  const verifiedAtMs = typeof data.verified_at_ms === "number" ? data.verified_at_ms : 0;
+  if (verifiedAtMs > 0 && Date.now() - verifiedAtMs < VERIFY_TTL_MS) {
+    return { connected: true, connection };
+  }
+
+  try {
+    const live = await githubRequest<{ login?: string; name?: string | null; avatar_url?: string | null }>(uid, "/user");
+    if (!live.login) return { connected: false, connection: null, reauthorize: true };
+    const refreshed: GithubConnection = {
+      ...connection,
+      login: live.login,
+      name: live.name ?? connection.name,
+      avatarUrl: live.avatar_url ?? connection.avatarUrl,
+    };
+    await ref.set({
+      login: refreshed.login,
+      name: refreshed.name,
+      avatar_url: refreshed.avatarUrl,
+      verified_at_ms: Date.now(),
+      updated_at: nowTs(),
+    }, { merge: true }).catch(() => {});
+    return { connected: true, connection: refreshed };
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "";
+    if (code === "GITHUB_401" || code === "GITHUB_TOKEN_INVALID" || code === "GITHUB_NOT_CONNECTED") {
+      return { connected: false, connection: null, reauthorize: true };
+    }
+    // Transient rate-limit, network, or 5xx upstream failure: keep the user's
+    // saved GitHub connection intact instead of dropping back to Connect GitHub.
+    return { connected: true, connection, upstreamDegraded: true };
+  }
+}
+
+export async function verifyAndSaveGithubToken(uid: string, rawToken: string): Promise<GithubConnection> {
+  if (!canStoreGithubTokens()) throw new Error("GITHUB_NOT_CONFIGURED");
+  const token = rawToken.trim();
+  if (token.length < 20 || token.length > 256 || /\s/.test(token)) {
+    throw new Error("GITHUB_TOKEN_INVALID");
+  }
+  const response = await fetch(`${API}/user`, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "QORVYNA-AI",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    signal: AbortSignal.timeout(15_000),
+    cache: "no-store",
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error("GITHUB_TOKEN_UNAUTHORIZED");
+  }
+  if (!response.ok) {
+    throw new Error(`GITHUB_${response.status}`);
+  }
+  const profile = await response.json() as { login?: string; name?: string | null; avatar_url?: string | null };
+  if (!profile.login) throw new Error("GITHUB_TOKEN_UNAUTHORIZED");
+  await saveGithubConnection(uid, token, {
+    login: profile.login,
+    name: profile.name ?? "",
+    avatar_url: profile.avatar_url ?? "",
+  }, "pat");
+  return (await getGithubConnection(uid))!;
 }
 
 export async function deleteGithubConnection(uid: string): Promise<void> {
@@ -148,6 +253,97 @@ export async function listGithubRepos(uid: string): Promise<GithubRepo[]> {
     }));
 }
 
+export function validRepoName(name: string): boolean {
+  return /^[A-Za-z0-9._-]{1,100}$/.test(name) && name !== "." && name !== "..";
+}
+
+export async function createGithubRepo(uid: string, input: {
+  name: string;
+  description?: string;
+  private?: boolean;
+  autoInit?: boolean;
+}): Promise<{
+  id: number;
+  fullName: string;
+  htmlUrl: string;
+  private: boolean;
+  defaultBranch: string;
+  permissions: { push: boolean };
+}> {
+  const name = input.name.trim();
+  if (!validRepoName(name)) throw new Error("REPO_NAME_INVALID");
+  const description = (input.description ?? "").trim().slice(0, 350);
+  const isPrivate = input.private !== false;
+  const autoInit = input.autoInit !== false;
+
+  const created = await githubRequest<{
+    id?: number;
+    full_name?: string;
+    html_url?: string;
+    private?: boolean;
+    default_branch?: string;
+  }>(uid, "/user/repos", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      description,
+      private: isPrivate,
+      auto_init: autoInit,
+    }),
+  });
+
+  if (
+    typeof created.id !== "number" ||
+    !created.full_name ||
+    !validRepo(created.full_name) ||
+    !created.html_url ||
+    !/^https:\/\/github\.com\//.test(created.html_url)
+  ) {
+    throw new Error("GITHUB_REPO_CREATE_UNCONFIRMED");
+  }
+
+  return {
+    id: created.id,
+    fullName: created.full_name,
+    htmlUrl: created.html_url,
+    private: Boolean(created.private ?? isPrivate),
+    defaultBranch: created.default_branch || "main",
+    permissions: { push: true },
+  };
+}
+
+export async function saveProjectGithubBinding(
+  uid: string,
+  projectId: string,
+  repository: string,
+  branch: string,
+): Promise<{ repository: string; branch: string }> {
+  checkedTarget(repository, branch);
+  const ref = adminDb().collection("projects").doc(projectId);
+  const snap = await ref.get();
+  if (!snap.exists || snap.data()?.owner_id !== uid) {
+    throw new Error("PROJECT_NOT_FOUND");
+  }
+  await ref.set({
+    github_repository: repository,
+    github_branch: branch,
+    updated_at: nowTs(),
+  }, { merge: true });
+  return { repository, branch };
+}
+
+export async function getProjectGithubBinding(
+  uid: string,
+  projectId: string,
+): Promise<{ repository: string; branch: string } | null> {
+  const snap = await adminDb().collection("projects").doc(projectId).get();
+  if (!snap.exists || snap.data()?.owner_id !== uid) return null;
+  const repo = typeof snap.data()?.github_repository === "string" ? snap.data()!.github_repository : "";
+  const branch = typeof snap.data()?.github_branch === "string" ? snap.data()!.github_branch : "";
+  if (!repo || !validRepo(repo)) return null;
+  return { repository: repo, branch: validBranch(branch) ? branch : "main" };
+}
+
 function validRepo(repo: string): boolean {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return false;
   return repo.split("/").every((part) => part !== "." && part !== "..");
@@ -207,7 +403,7 @@ function makeReviewToken(claims: ReviewClaims): string {
 }
 export function verifyGithubReview(token: string, uid: string, input: { repository: string; branch: string; files: AgentFile[] }, now = Date.now()): ReviewClaims {
   const [payload, signature, extra] = token.split(".");
-  if (!payload || !signature || extra || token.length > 2048 || !isGithubConfigured()) throw new Error("GITHUB_REVIEW_REQUIRED");
+  if (!payload || !signature || extra || token.length > 2048 || !canStoreGithubTokens()) throw new Error("GITHUB_REVIEW_REQUIRED");
   const expected = Buffer.from(signReview(payload));
   const actual = Buffer.from(signature);
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new Error("GITHUB_REVIEW_REQUIRED");
@@ -353,4 +549,145 @@ export async function pushAgentFiles(uid: string, input: {
   const commit = result.data?.createCommitOnBranch?.commit;
   if (!commit?.oid || !SHA_RE.test(commit.oid) || !commit.url || !/^https:\/\/github\.com\//.test(commit.url)) throw new Error("GITHUB_COMMIT_UNCONFIRMED");
   return { commitSha: commit.oid, commitUrl: commit.url, branch };
+}
+
+/**
+ * Push reviewed code files onto a new/dedicated head branch created from the
+ * reviewed base branch HEAD and open a GitHub Pull Request atomically.
+ */
+export async function pushAgentFilesViaPullRequest(uid: string, input: {
+  repository: string;
+  baseBranch: string;
+  headBranch: string;
+  title: string;
+  body?: string;
+  message: string;
+  files: AgentFile[];
+  reviewToken: string;
+}): Promise<{
+  commitSha: string;
+  commitUrl: string;
+  branch: string;
+  baseBranch: string;
+  prNumber: number;
+  prUrl: string;
+}> {
+  const { repository, baseBranch, headBranch } = input;
+  checkedTarget(repository, baseBranch);
+  checkedTarget(repository, headBranch);
+  if (baseBranch === headBranch) throw new Error("PR_SAME_BRANCH");
+
+  const message = input.message.trim().slice(0, 160);
+  if (!message) throw new Error("COMMIT_MESSAGE_REQUIRED");
+  const title = input.title.trim().slice(0, 160);
+  if (!title) throw new Error("PR_TITLE_REQUIRED");
+  const body = (input.body ?? "").trim().slice(0, 10_000);
+
+  // Verify the HMAC review token bound to { repository, branch: baseBranch, files }
+  const review = verifyGithubReview(input.reviewToken, uid, {
+    repository,
+    branch: baseBranch,
+    files: input.files,
+  });
+  await writableRepository(uid, repository);
+  if ((await branchHead(uid, repository, baseBranch)) !== review.head) {
+    throw new Error("GITHUB_HEAD_CHANGED");
+  }
+
+  // Ensure headBranch either does not exist yet (create from review.head) or
+  // already points to the exact reviewed base HEAD (never clobber divergent work).
+  let headBranchReady = false;
+  try {
+    const existingSha = await branchHead(uid, repository, headBranch);
+    if (existingSha !== review.head) throw new Error("GITHUB_BRANCH_EXISTS");
+    headBranchReady = true;
+  } catch (err) {
+    if (err instanceof Error && err.message === "GITHUB_404") {
+      headBranchReady = false;
+    } else {
+      throw err;
+    }
+  }
+
+  await consumeGithubReview(review);
+
+  if (!headBranchReady) {
+    const createdRef = await githubRequest<{ object?: { sha?: string } }>(
+      uid,
+      `/repos/${repository}/git/refs`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ref: `refs/heads/${headBranch}`,
+          sha: review.head,
+        }),
+      },
+    );
+    if (!createdRef.object?.sha || !SHA_RE.test(createdRef.object.sha)) {
+      throw new Error("GITHUB_BRANCH_CREATE_FAILED");
+    }
+  }
+
+  const commitResult = await githubRequest<{
+    data?: { createCommitOnBranch?: { commit?: { oid?: string; url?: string } } };
+    errors?: Array<{ message?: string; type?: string }>;
+  }>(uid, "/graphql", {
+    method: "POST",
+    body: JSON.stringify({
+      query: `mutation CreateReviewedCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }`,
+      variables: {
+        input: {
+          branch: { repositoryNameWithOwner: repository, branchName: headBranch },
+          expectedHeadOid: review.head,
+          message: { headline: message },
+          fileChanges: {
+            additions: input.files.map(({ path, content }) => ({
+              path,
+              contents: Buffer.from(content, "utf8").toString("base64"),
+            })),
+          },
+        },
+      },
+    }),
+  });
+
+  if (commitResult.errors?.length) {
+    if (commitResult.errors.some((error) => /expected.{0,30}head|head.{0,30}(?:change|match|oid)|stale/i.test(error.message ?? ""))) {
+      throw new Error("GITHUB_HEAD_CHANGED");
+    }
+    throw new Error("GITHUB_COMMIT_REJECTED");
+  }
+
+  const commit = commitResult.data?.createCommitOnBranch?.commit;
+  if (!commit?.oid || !SHA_RE.test(commit.oid) || !commit.url || !/^https:\/\/github\.com\//.test(commit.url)) {
+    throw new Error("GITHUB_COMMIT_UNCONFIRMED");
+  }
+
+  const pr = await githubRequest<{ number?: number; html_url?: string }>(
+    uid,
+    `/repos/${repository}/pulls`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        body,
+        base: baseBranch,
+        head: headBranch,
+      }),
+    },
+  );
+
+  const expectedPrUrl = `https://github.com/${repository}/pull/${pr.number ?? ""}`;
+  if (!Number.isInteger(pr.number) || (pr.number ?? 0) < 1 || pr.html_url !== expectedPrUrl) {
+    throw new Error("GITHUB_PR_UNCONFIRMED");
+  }
+
+  return {
+    commitSha: commit.oid,
+    commitUrl: commit.url,
+    branch: headBranch,
+    baseBranch,
+    prNumber: pr.number!,
+    prUrl: pr.html_url,
+  };
 }

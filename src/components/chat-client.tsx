@@ -23,7 +23,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
-  ArrowDown, BookOpen, Braces, BrainCircuit, Code2, Copy, Download, ExternalLink, FileDown, FileSearch, Flag, GraduationCap,
+  ArrowDown, BookOpen, Braces, BrainCircuit, Code2, Copy, Download, ExternalLink, FileDown, FileSearch, Flag, FolderPlus, GraduationCap,
   Image as ImageIcon, Layers, Lightbulb, Lock, MonitorPlay, Pencil, Play, RefreshCcw, RotateCcw, Share2, ShieldAlert, Sparkles,
   Trash2, Volume2, VolumeX, WandSparkles, X, Zap,
 } from "lucide-react";
@@ -194,7 +194,8 @@ const AGENT_SUGGESTIONS = [
   { icon: <Code2 size={15} strokeWidth={1.5} />, label: "Build a responsive website", prompt: "Build a polished responsive website from my description. Start by asking only for the one most important missing requirement." },
   { icon: <FileSearch size={15} strokeWidth={1.5} />, label: "Fix an attached project", prompt: "Review the attached project files, identify the root cause, and return complete corrected files." },
   { icon: <MonitorPlay size={15} strokeWidth={1.5} />, label: "Create a live prototype", prompt: "Create a self-contained HTML, CSS and JavaScript prototype that I can open in Live Preview." },
-  { icon: <Code2 size={15} strokeWidth={1.5} />, label: "Prepare a GitHub change", desc: "Scope a change, then push", action: "github_change" },
+  { icon: <FolderPlus size={15} strokeWidth={1.5} />, label: "Create a GitHub repo", desc: "Create & link a repo from AI", action: "github_create_repo" },
+  { icon: <Code2 size={15} strokeWidth={1.5} />, label: "Prepare a GitHub change", desc: "Scope a change, then push PR", action: "github_change" },
 ];
 
 /**
@@ -372,6 +373,25 @@ export function ChatClient({
   const githubChangeTemplateRef = useRef<((title: string) => string) | null>(null);
   /** Show the Connect GitHub panel before a push when GitHub is not connected. */
   const [githubPanelOpen, setGithubPanelOpen] = useState(false);
+  const [githubCreateRepoOpen, setGithubCreateRepoOpen] = useState(false);
+  const [aiRepoSuggestion, setAiRepoSuggestion] = useState<{ name: string; description: string } | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const ghStatus = url.searchParams.get("github");
+    if (!ghStatus) return;
+    url.searchParams.delete("github");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    setGithubPanelOpen(true);
+    if (ghStatus === "connected") {
+      setNotice("GitHub account connected and saved.");
+    } else if (ghStatus === "not-configured") {
+      setNotice("GitHub OAuth redirect is not configured on this host — you can still connect using Save token below.");
+    } else if (ghStatus !== "denied") {
+      setNotice(`GitHub connection status: ${ghStatus}.`);
+    }
+  }, []);
   // "Awaiting approval": executable work requested in a conversation mode.
   const [handoff, setHandoff] = useState<PendingHandoff | null>(null);
   const lastBuildIntentRef = useRef<BuildIntent | null>(null);
@@ -2137,7 +2157,28 @@ export function ChatClient({
       setHandoff({ turnId, message, rawMessage, intent: approvedIntent(buildIntent, handoffReason), reason: handoffReason, attachments: pending, audioAssetId, reuseUser });
       return;
     }
+    if (/\b(?:create|make|init(?:ialize)?)\b[\s\S]{0,40}\bgithub\s+repo(?:sitory)?\b/i.test(rawMessage) || (mode === "agent" && /\bcreate\s+(?:a\s+|new\s+)?repo(?:sitory)?\b/i.test(rawMessage))) {
+      const named = rawMessage.match(/(?:called|named|name)\s+["'`]?([a-zA-Z0-9._-]{2,80})["'`]?/i)?.[1];
+      setAiRepoSuggestion({
+        name: named || title || "qorvyna-ai-project",
+        description: rawMessage.slice(0, 200),
+      });
+      setGithubCreateRepoOpen(true);
+      setGithubPanelOpen(true);
+    }
     await streamMessage(message, { attachments: pending, imageStoragePath: attachedImage?.storagePath ?? null, intent, turnId, audioAssetId, ...flow });
+  }
+
+  function openCreateGithubRepoFromAi() {
+    setNotice(null);
+    setFailure(null);
+    switchMode("agent");
+    setAiRepoSuggestion({
+      name: title || "qorvyna-ai-project",
+      description: title ? `${title} — created from QORVYNA AI` : "Created and managed with QORVYNA AI",
+    });
+    setGithubCreateRepoOpen(true);
+    setGithubPanelOpen(true);
   }
 
   /**
@@ -3073,6 +3114,7 @@ export function ChatClient({
                         // Agent is a mode of this conversation, not another page.
                         if ("href" in suggestion && suggestion.href) { if (isTemporary) router.push(suggestion.href); else switchMode("agent"); }
                         else if ("action" in suggestion && suggestion.action === "attach") fileRef.current?.click();
+                        else if ("action" in suggestion && suggestion.action === "github_create_repo") openCreateGithubRepoFromAi();
                         else if ("action" in suggestion && suggestion.action === "github_change") void prepareGitHubChange();
                         else if (suggestion.prompt) void send(undefined, suggestion.prompt);
                       }}
@@ -3189,7 +3231,16 @@ export function ChatClient({
                 </div>
               </div>
             ) : null}
-            {githubPanelOpen ? <GithubConnection showPush /> : null}
+            {githubPanelOpen ? (
+              <GithubConnection
+                showPush
+                files={agentFiles}
+                projectId={agentProjectId ?? undefined}
+                suggestedRepoName={aiRepoSuggestion?.name ?? (title || undefined)}
+                suggestedRepoDescription={aiRepoSuggestion?.description}
+                autoOpenCreateRepo={githubCreateRepoOpen}
+              />
+            ) : null}
           </div>
         </div>
         {chatScroll.newBelow ? (

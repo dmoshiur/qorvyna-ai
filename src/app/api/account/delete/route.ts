@@ -76,6 +76,7 @@ export async function POST(req: NextRequest) {
     d.collection("user_security_settings").doc(uid).delete(),
     d.collection("guardian_consents").doc(uid).delete(),
     d.collection("github_connections").doc(uid).delete(),
+    d.collection("daytona_connections").doc(uid).delete(),
     d.collection("admin_role_assignments").doc(uid).delete(),
   ]);
   await Promise.all([

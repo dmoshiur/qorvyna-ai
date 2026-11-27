@@ -11,7 +11,8 @@ import type { SessionUser } from "@/lib/firebase/session";
 import { RiskTier, toolRegistry, type ToolContext, type ToolResult } from "@/lib/ai/tools/registry";
 import { listProjects, getProject } from "@/lib/server/projects";
 import { githubMcpFileSchema, readGithubMcpFile, type GithubMcpFileInput } from "@/lib/server/mcp/github";
-import { listGithubRepos, getGithubConnection } from "@/lib/server/github";
+import { listGithubRepos, getGithubConnection, createGithubRepo } from "@/lib/server/github";
+import { runDaytonaCode } from "@/lib/server/daytona";
 import { latestBuildRunForProject } from "@/lib/server/build";
 import { listDevices } from "@/lib/server/pairing";
 import { listHubDevices } from "@/lib/server/device-hub";
@@ -114,6 +115,101 @@ toolRegistry.register({
     } catch (err) {
       const message = err instanceof Error ? err.message : "GITHUB_ERROR";
       return { ok: false, error: message === "GITHUB_NOT_CONNECTED" ? "GITHUB_NOT_CONNECTED" : "GITHUB_ERROR" };
+    }
+  },
+});
+
+toolRegistry.register({
+  id: "github.create_repo",
+  description: "Create a new GitHub repository on the signed-in user's connected GitHub account after explicit user approval.",
+  category: "git",
+  risk: RiskTier.MEDIUM,
+  requiredPermissions: [],
+  scopes: ["github:write"],
+  environment: "external-api",
+  timeoutSeconds: 20,
+  approvalRequired: true,
+  auditRequired: true,
+  rateLimitPerMinute: 5,
+  modelCallable: false,
+  inputSchema: z.object({
+    name: z.string().min(1).max(100),
+    description: z.string().max(350).optional(),
+    private: z.boolean().default(true),
+    auto_init: z.boolean().default(true),
+  }),
+  handler: async (
+    ctx,
+    input: { name: string; description?: string; private: boolean; auto_init: boolean },
+  ): Promise<ToolResult> => {
+    if (ctx.dryRun) {
+      return { ok: true, data: { dry_run: true, name: input.name }, message: "Dry run: repository was not created." };
+    }
+    try {
+      const repo = await createGithubRepo(ctx.uid, {
+        name: input.name,
+        description: input.description,
+        private: input.private,
+        autoInit: input.auto_init,
+      });
+      return {
+        ok: true,
+        data: { repository: repo },
+        message: `Created GitHub repository ${repo.fullName}.`,
+      };
+    } catch (err) {
+      const code = err instanceof Error ? err.message : "GITHUB_ERROR";
+      return { ok: false, error: /^[A-Z0-9_]+$/.test(code) ? code : "GITHUB_ERROR" };
+    }
+  },
+});
+
+toolRegistry.register({
+  id: "daytona.code_run",
+  description: "Execute TypeScript, JavaScript, or Python code inside an isolated Daytona Cloud Sandbox (@daytona/sdk) after explicit approval.",
+  category: "projects",
+  risk: RiskTier.MEDIUM,
+  requiredPermissions: [],
+  scopes: ["projects:write"],
+  environment: "isolated-worker",
+  timeoutSeconds: 60,
+  approvalRequired: true,
+  auditRequired: true,
+  rateLimitPerMinute: 10,
+  modelCallable: false,
+  inputSchema: z.object({
+    code: z.string().min(1).max(100_000),
+    language: z.enum(["typescript", "javascript", "python"]).default("typescript"),
+    timeout_seconds: z.number().int().min(1).max(60).default(30),
+  }),
+  handler: async (
+    ctx,
+    input: { code: string; language: "typescript" | "javascript" | "python"; timeout_seconds: number },
+  ): Promise<ToolResult> => {
+    if (ctx.dryRun) {
+      return { ok: true, data: { dry_run: true, language: input.language }, message: "Dry run: sandbox was not started." };
+    }
+    try {
+      const result = await runDaytonaCode(ctx.uid, {
+        code: input.code,
+        language: input.language,
+        timeoutSeconds: input.timeout_seconds,
+      });
+      return {
+        ok: result.exitCode === 0,
+        data: {
+          exit_code: result.exitCode,
+          result: result.result,
+          stdout: result.stdout,
+          sandbox_id: result.sandboxId,
+          duration_ms: result.durationMs,
+        },
+        ...(result.exitCode !== 0 ? { error: "DAYTONA_NONZERO_EXIT" } : {}),
+        message: `Daytona sandbox finished with exit code ${result.exitCode}.`,
+      };
+    } catch (err) {
+      const code = err instanceof Error ? err.message : "DAYTONA_ERROR";
+      return { ok: false, error: /^[A-Z0-9_]+$/.test(code) ? code : "DAYTONA_ERROR" };
     }
   },
 });

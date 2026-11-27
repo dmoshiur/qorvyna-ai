@@ -56,8 +56,13 @@ service cloud.firestore {
     }
 
     match /github_connections/{uid} {
-      // Contains an encrypted OAuth token. Status and mutations are available
+      // Contains an encrypted OAuth/PAT token. Status and mutations are available
       // only through authenticated server routes; browser Firestore gets none.
+      allow read, write: if false;
+    }
+
+    match /daytona_connections/{uid} {
+      // Contains an encrypted Daytona API key; server routes only.
       allow read, write: if false;
     }
 

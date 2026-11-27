@@ -79,6 +79,10 @@ services:
       # the GitHub OAuth App and NEXT_PUBLIC_APP_URL + /api/github/callback.
       - key: GITHUB_OAUTH_CALLBACK_URL
         value: https://qorvyna.thamjj13.top/api/github/callback
+      - key: DAYTONA_API_KEY
+        sync: false
+      - key: DAYTONA_TARGET
+        sync: false
       # Optional settings carry the product name as QORVYNA_<NAME> (for example
       # QORVYNA_TRUST_PROXY_HEADERS, QORVYNA_ANDROID_APK_URL). The former
       # MATRIX_<NAME> spelling is still read, so an existing service needs no

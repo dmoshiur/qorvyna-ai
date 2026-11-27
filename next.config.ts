@@ -27,9 +27,9 @@ const nextConfig: NextConfig = {
       { source: "/__/auth", destination: "/api/auth/firebase-handler" },
     ];
   },
-  // PDFKit is a CommonJS/Node library with its own binary assets; bundling it
-  // breaks its `fs` reads. Keep it external on the server.
-  serverExternalPackages: ["pdfkit"],
+  // PDFKit and Daytona SDK are Node server libraries; bundling them breaks
+  // dynamic/native server imports. Keep them external on the server.
+  serverExternalPackages: ["pdfkit", "@daytona/sdk"],
   // The PDF engine reads its embedded Unicode fonts from disk at runtime, so
   // they must be traced into the deployment output.
   outputFileTracingIncludes: {

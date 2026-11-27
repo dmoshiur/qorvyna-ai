@@ -1,8 +1,8 @@
 import "server-only";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { adminDb, nowTs } from "@/lib/firebase/admin";
-import { env, isGithubConfigured } from "@/lib/env";
-import { checkedTarget, githubRequest, writableRepository } from "@/lib/server/github";
+import { env } from "@/lib/env";
+import { canStoreGithubTokens, checkedTarget, githubRequest, writableRepository } from "@/lib/server/github";
 
 type Input = { repository: string; number: number };
 type Pr = { number?: number; title?: string; state?: string; draft?: boolean; merged?: boolean; mergeable?: boolean | null; changed_files?: number; updated_at?: string; base?: { ref?: string; sha?: string; repo?: { full_name?: string } }; head?: { sha?: string; repo?: { full_name?: string } } };
@@ -28,7 +28,7 @@ const sign = (payload: string) => createHmac("sha256", env.github.tokenEncryptio
 function encode(claims: Claims) { const payload = Buffer.from(JSON.stringify(claims)).toString("base64url"); return `${payload}.${sign(payload)}`; }
 function decode(token: string, uid: string, input: Input): Claims {
   const [payload, signature, extra] = token.split(".");
-  if (!isGithubConfigured() || !payload || !signature || extra || token.length > 2048) throw new Error("GITHUB_REVIEW_REQUIRED");
+  if (!canStoreGithubTokens() || !payload || !signature || extra || token.length > 2048) throw new Error("GITHUB_REVIEW_REQUIRED");
   const expected = Buffer.from(sign(payload)), actual = Buffer.from(signature);
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new Error("GITHUB_REVIEW_REQUIRED");
   let c: Claims;
