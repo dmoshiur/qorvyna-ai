@@ -453,14 +453,36 @@ export type StoredAccount = {
   key_hint: string;
   created_at: string | null;
   readable: boolean;
+  /** Latest real provider test (null = this account has never been tested). */
+  last_test_at: string | null;
+  last_test_ok: boolean | null;
+  last_test_status: number | null;
+  last_test_category: string | null;
+  last_test_detail: string | null;
+  last_test_model: string | null;
+  last_test_latency_ms: number | null;
+  /** Timestamp of the most recent request the provider accepted. */
+  last_ok_at: string | null;
 };
 
 export async function listStoredAccounts(d: Db): Promise<StoredAccount[]> {
   const snap = await d.collection(COLLECTION).get();
   return snap.docs.map((doc) => {
-    const data = doc.data() as { provider?: string; label?: string; base_url?: string; enabled?: boolean; key_hint?: string; account_id?: string; api_key_encrypted?: string; created_at?: { toDate?: () => Date } };
+    const data = doc.data() as {
+      provider?: string; label?: string; base_url?: string; enabled?: boolean; key_hint?: string; account_id?: string;
+      api_key_encrypted?: string; created_at?: { toDate?: () => Date };
+      last_test_at?: { toDate?: () => Date } | string; last_test_ok?: boolean; last_test_status?: number | null;
+      last_test_category?: string | null; last_test_detail?: string | null; last_test_model?: string | null;
+      last_test_latency_ms?: number | null; last_ok_at?: { toDate?: () => Date } | string;
+    };
     const provider = providerInfo(String(data.provider ?? ""))?.type ?? "groq";
     const baseUrl = String(data.base_url ?? "");
+    const asIso = (value: { toDate?: () => Date } | string | Date | undefined): string | null => {
+      if (!value) return null;
+      if (typeof value === "string") return value;
+      if (value instanceof Date) return value.toISOString();
+      return value.toDate?.().toISOString() ?? null;
+    };
     return {
       doc_id: doc.id,
       id: String(data.account_id ?? ""),
@@ -472,8 +494,54 @@ export async function listStoredAccounts(d: Db): Promise<StoredAccount[]> {
       key_hint: String(data.key_hint ?? ""),
       created_at: data.created_at?.toDate?.().toISOString() ?? null,
       readable: Boolean(data.api_key_encrypted && decryptSecret(data.api_key_encrypted)),
+      last_test_at: asIso(data.last_test_at),
+      last_test_ok: typeof data.last_test_ok === "boolean" ? data.last_test_ok : null,
+      last_test_status: typeof data.last_test_status === "number" ? data.last_test_status : null,
+      last_test_category: typeof data.last_test_category === "string" ? data.last_test_category : null,
+      last_test_detail: typeof data.last_test_detail === "string" ? data.last_test_detail : null,
+      last_test_model: typeof data.last_test_model === "string" ? data.last_test_model : null,
+      last_test_latency_ms: typeof data.last_test_latency_ms === "number" ? data.last_test_latency_ms : null,
+      last_ok_at: asIso(data.last_ok_at),
     };
   });
+}
+
+/**
+ * Persist the outcome of an admin provider test on the account document: the
+ * latest test timestamp/status plus — only after a successful test — the last
+ * successful request time. A failed test never erases a previous success, and
+ * nothing here ever stores credential material.
+ */
+export async function recordStoredAccountVerification(
+  d: Db,
+  docId: string,
+  result: {
+    ok: boolean;
+    status: number | null;
+    category: string | null;
+    detail: string | null;
+    model: string | null;
+    latency_ms: number | null;
+  },
+  testedAt = new Date().toISOString(),
+): Promise<void> {
+  const ref = d.collection(COLLECTION).doc(docId);
+  const snap = await ref.get();
+  if (!snap.exists || !snap.data()?.provider) return;
+  await ref.set(
+    {
+      last_test_at: testedAt,
+      last_test_ok: result.ok,
+      last_test_status: result.status,
+      last_test_category: result.category,
+      last_test_detail: (result.detail ?? "").slice(0, 400),
+      last_test_model: result.model,
+      last_test_latency_ms: result.latency_ms,
+      ...(result.ok ? { last_ok_at: testedAt } : {}),
+      updated_at: nowTs(),
+    },
+    { merge: true },
+  );
 }
 
 /** Register a provider key. The key is encrypted before it is written and is never returned. */

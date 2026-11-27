@@ -4,7 +4,7 @@
 // never sent to the browser and are sanitized before they reach logs.
 
 /** Hosts that can serve QORVYNA's language models (and the Whisper speech service). */
-export type AIProviderName = "Groq" | "OpenAI" | "Cloudflare";
+export type AIProviderName = "Groq" | "OpenAI" | "Cloudflare" | "Google";
 
 export type AIProviderErrorType =
   | "authentication"
@@ -21,6 +21,11 @@ const SECRET_PATTERNS = [
   /Bearer\s+[A-Za-z0-9._~+/=-]+/gi,
   /(?:sk|gsk|key)[-_][A-Za-z0-9._-]+/gi,
   /(?:api[_-]?key|authorization|token|password|secret)\s*[:=]\s*[^,\s}]+/gi,
+  // Google API keys: legacy AIza… and the newer AQ.… auth-key format. Google
+  // error messages occasionally echo the offending credential; it must never
+  // reach a log or the browser.
+  /AIza[0-9A-Za-z_-]{20,}/g,
+  /AQ\.[A-Za-z0-9_-]{20,}/g,
 ];
 
 /** Keep diagnostics useful without retaining credentials or large upstream payloads. */

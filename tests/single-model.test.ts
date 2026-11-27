@@ -451,7 +451,11 @@ describe("the removed integrations are gone from the codebase", () => {
   const sources = walk("src").map((path) => ({ path, text: readFileSync(path, "utf8") }));
 
   it("has no provider modules for other models", () => {
-    for (const gone of ["glm", "gemini", "anthropic", "openrouter", "managed-providers", "runtime-config", "provider-registry", "model-routing", "model-preferences"]) {
+    // gemini.ts is the credential/authentication adapter for the admin
+    // "Provider accounts" surface (verification + catalogs only) — the Gemini
+    // integration is explicitly restored as provider CONFIGURATION; it is not
+    // wired into any model request path (see the routing tests below).
+    for (const gone of ["glm", "anthropic", "openrouter", "managed-providers", "runtime-config", "provider-registry", "model-routing", "model-preferences"]) {
       expect(sources.some((file) => file.path.endsWith(`src/lib/ai/${gone}.ts`)), gone).toBe(false);
     }
     expect(sources.some((file) => /glm-provider|managed-ai-providers|ai-provider-settings/.test(file.path))).toBe(false);
@@ -468,7 +472,9 @@ describe("the removed integrations are gone from the codebase", () => {
     // The admin panel manages provider credentials and catalogs for any
     // provider family; that is configuration, not runtime routing. The
     // single-model rule above still holds for every model request path.
-    const adminProviderFiles = /src\/(lib\/ai\/(provider-types|providers|provider-models|accounts)\.ts|components\/admin\/(provider-accounts|ai-config-tabs)\.tsx)$/;
+    // gemini.ts joins the allowlist as the Gemini credential/authentication
+    // adapter for that configuration surface — it serves no chat route.
+    const adminProviderFiles = /src\/(lib\/ai\/(provider-types|providers|provider-models|accounts|gemini)\.ts|components\/admin\/(provider-accounts|ai-config-tabs)\.tsx)$/;
     const offenders = sources
       // reasoning.ts documents which model families emit  blocks; image/config.ts
       // explains that a legacy saved image record is ignored.

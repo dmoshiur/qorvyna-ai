@@ -136,13 +136,48 @@ describe("provider catalog probe", () => {
     expect(headers["anthropic-version"]).toBe("2023-06-01");
   });
 
-  it("queries Google and normalizes model names", async () => {
-    const spy = stubFetch(() => new Response(JSON.stringify({ models: [{ name: "models/gemini-2.0-flash" }] }), { status: 200 }));
+  it("queries Google through X-goog-api-key and verifies with a real generateContent request", async () => {
+    const spy = stubFetch((url) => {
+      if (String(url).includes(":generateContent")) {
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "AI learns from data." }] } }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: [{ name: "models/gemini-2.0-flash" }] }), { status: 200 });
+    });
     const result = await probeProvider("google", "https://generativelanguage.googleapis.com", GOOGLE_KEY);
     expect(result.ok).toBe(true);
+    expect(result.verified).toBe(true);
     expect(result.models).toEqual(["gemini-2.0-flash"]);
-    const [url] = spy.mock.calls[0];
-    expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/models");
+    expect(result.category).toBeNull();
+
+    // Catalog request: key in X-goog-api-key, never a Bearer header, never in the URL.
+    const [catalogUrl, catalogInit] = spy.mock.calls[0];
+    expect(catalogUrl).toBe("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200");
+    expect((catalogInit!.headers as Record<string, string>)["X-goog-api-key"]).toBe(GOOGLE_KEY);
+    expect(JSON.stringify(catalogInit!.headers)).not.toContain("Bearer");
+    expect(String(catalogUrl)).not.toContain(GOOGLE_KEY);
+
+    // Verification request: documented endpoint, model and body.
+    const [genUrl, genInit] = spy.mock.calls[1];
+    expect(genUrl).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent");
+    expect((genInit!.headers as Record<string, string>)["X-goog-api-key"]).toBe(GOOGLE_KEY);
+    expect(JSON.parse(String(genInit!.body))).toMatchObject({ contents: [{ parts: [{ text: "Explain how AI works in a few words" }] }] });
+  });
+
+  it("reports the real Google failure (401) with its category, not a generic message", async () => {
+    stubFetch((url) => {
+      if (String(url).includes(":generateContent")) {
+        return new Response(JSON.stringify({ error: { code: 401, message: "API key not valid. Please pass a valid API key.", status: "UNAUTHENTICATED" } }), { status: 401 });
+      }
+      return new Response(JSON.stringify({ models: [{ name: "models/gemini-2.0-flash" }] }), { status: 200 });
+    });
+    const result = await probeProvider("google", "https://generativelanguage.googleapis.com", GOOGLE_KEY);
+    expect(result.ok).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.status).toBe(401);
+    expect(result.category).toBe("authentication");
+    expect(result.error).toContain("401");
+    expect(result.error).toContain("API key not valid");
+    expect(result.models).toEqual(["gemini-2.0-flash"]);
   });
 
   it("reports rejected credentials and never invents models", async () => {
@@ -322,6 +357,46 @@ describe("/api/rpc provider accounts & models", () => {
     const result = await callRpc("admin_provider_account_test", { doc_id: docId });
     expect(result.status).toBe(200);
     expect(result.body.data).toMatchObject({ ok: true, models: ["gpt-4o"], provider: "openai" });
+  });
+
+  it("persists a Google verification result and never echoes the credential", async () => {
+    const added = await callRpc("admin_provider_account_add", { label: "Gemini main", provider: "google", api_key: GOOGLE_KEY_NEW });
+    expect(added.status).toBe(200);
+    const docId = (added.body.data as { doc_id: string }).doc_id;
+
+    stubFetch((url) => {
+      if (String(url).includes(":generateContent")) {
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ models: [{ name: "models/gemini-flash-latest" }] }), { status: 200 });
+    });
+    const verified = await callRpc("admin_provider_account_test", { doc_id: docId });
+    expect(verified.status).toBe(200);
+    const data = verified.body.data as Record<string, unknown>;
+    expect(data).toMatchObject({ ok: true, verified: true, category: null, model_used: "gemini-flash-latest" });
+    expect(JSON.stringify(verified.body)).not.toContain(GOOGLE_KEY_NEW);
+
+    const storedDoc = fakeDb.dump("provider_accounts")[docId];
+    expect(storedDoc?.last_test_ok).toBe(true);
+    expect(storedDoc?.last_test_category).toBeNull();
+    expect(storedDoc?.last_ok_at).toBeTruthy();
+    expect(JSON.stringify(storedDoc)).not.toContain(GOOGLE_KEY_NEW);
+
+    // A failing later test keeps the earlier success (last_ok_at) but records the failure.
+    stubFetch((url) => {
+      if (String(url).includes(":generateContent")) {
+        return new Response(JSON.stringify({ error: { code: 403, message: "PERMISSION_DENIED", status: "PERMISSION_DENIED" } }), { status: 403 });
+      }
+      return new Response(JSON.stringify({ models: [{ name: "models/gemini-flash-latest" }] }), { status: 200 });
+    });
+    const rejected = await callRpc("admin_provider_account_test", { doc_id: docId });
+    expect(rejected.status).toBe(200);
+    expect(rejected.body.data).toMatchObject({ ok: false, verified: false, status: 403, category: "permission" });
+
+    const after = fakeDb.dump("provider_accounts")[docId];
+    expect(after?.last_test_ok).toBe(false);
+    expect(after?.last_test_category).toBe("permission");
+    expect(after?.last_ok_at).toEqual(storedDoc?.last_ok_at);
   });
 
   it("rejects invalid credentials and non-admin callers", async () => {

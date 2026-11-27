@@ -847,7 +847,7 @@ const ACTIONS: Record<string, Handler> = {
     await rpc.logAudit(d, u.uid, "provider_account_added", "provider_accounts", result.doc_id, "", { provider: provider.type, account: result.id });
     return result;
   },
-  /** Verify a credential against the provider's live model catalog. */
+  /** Verify a credential with a REAL request to the provider (Google: X-goog-api-key + generateContent). */
   admin_provider_account_test: async (d, u, b) => {
     if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
     const stored = typeof b.doc_id === "string" ? b.doc_id : "";
@@ -855,14 +855,25 @@ const ACTIONS: Record<string, Handler> = {
       const account = await providerAccounts.storedAccountCredentials(d, stored);
       if (!account) throw new RpcError("NOT_FOUND", 404);
       const result = await probeProvider(account.provider, account.baseUrl, account.key);
-      await rpc.logAudit(d, u.uid, "provider_account_tested", "provider_accounts", stored, "", { provider: account.provider, ok: result.ok });
+      // Persist the verification outcome on the account document (never the
+      // credential) so Configured ≠ Verified is visible across restarts.
+      const testedAt = new Date().toISOString();
+      await providerAccounts.recordStoredAccountVerification(d, stored, {
+        ok: result.ok,
+        status: result.status,
+        category: result.category,
+        detail: result.detail ?? result.error,
+        model: result.model_used,
+        latency_ms: result.latency_ms,
+      }, testedAt);
+      await rpc.logAudit(d, u.uid, "provider_account_tested", "provider_accounts", stored, "", { provider: account.provider, ok: result.ok, status: result.status, category: result.category });
       const info = providerInfo(account.provider)!;
-      return { provider: account.provider, provider_label: info.label, ...result };
+      return { provider: account.provider, provider_label: info.label, checked_at: testedAt, ...result };
     }
     const provider = providerInfo(str(b.provider, "groq"));
     if (!provider) throw new RpcError("INVALID_PROVIDER", 400, "That provider type is not supported.");
     const result = await probeProvider(provider.type, str(b.base_url, provider.defaultBaseUrl), typeof b.api_key === "string" ? b.api_key : "");
-    return { provider: provider.type, provider_label: provider.label, ...result };
+    return { provider: provider.type, provider_label: provider.label, checked_at: new Date().toISOString(), ...result };
   },
   admin_provider_account_update: async (d, u, b) => {
     if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
