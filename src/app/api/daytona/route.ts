@@ -7,17 +7,24 @@ import { mutationCsrfResponse } from "@/lib/server/request-security";
 import { hasPermission } from "@/lib/server/rpc";
 import { getProject } from "@/lib/server/projects";
 import {
-  deleteDaytonaConnection,
+  countLegacyDaytonaUserKeys,
+  deleteDaytonaSystemConnection,
   getDaytonaStatus,
+  migrateLegacyDaytonaUserKey,
   runDaytonaCode,
   runDaytonaCommand,
-  saveDaytonaConnection,
+  saveDaytonaSystemConnection,
 } from "@/lib/server/daytona";
 import { getServerAgentOps } from "@/lib/agentops/server";
 import { QORVYNA_MODEL_ID } from "@/lib/ai/model";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Daytona is a SYSTEM-wide integration: exactly one sandbox configuration,
+// managed from the admin panel (Admin → AI configuration → Sandbox). Regular
+// users execute code/commands through it but never see or set the key.
+const ADMIN_PERMISSION = "system.settings";
 
 const hits = new Map<string, number[]>();
 function daytonaRateLimited(uid: string, limit = 12, now = Date.now()): boolean {
@@ -48,8 +55,22 @@ async function auditDaytona(uid: string, action: string, outcome: string, detail
 export async function GET(req: NextRequest) {
   const user = await getApiSessionUser(req);
   if (!user) return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
-  const status = await getDaytonaStatus(user.uid);
-  return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+  const status = await getDaytonaStatus();
+  // Admin-only extras: how many legacy per-user keys still exist for migration.
+  let admin: { legacyUserKeys: number } | undefined;
+  if (adminConfigured()) {
+    try {
+      if (await hasPermission(adminDb(), user.uid, ADMIN_PERMISSION)) {
+        admin = { legacyUserKeys: await countLegacyDaytonaUserKeys() };
+      }
+    } catch {
+      // Permission lookup failure simply omits admin extras.
+    }
+  }
+  return NextResponse.json(
+    { ...status, ...(admin ? { admin } : {}) },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }
 
 const postSchema = z.discriminatedUnion("action", [
@@ -57,10 +78,12 @@ const postSchema = z.discriminatedUnion("action", [
     action: z.literal("configure"),
     apiKey: z.string().min(16).max(256),
     target: z.string().max(48).optional(),
-    scope: z.enum(["user", "system"]).optional(),
   }),
   z.object({
     action: z.literal("disconnect"),
+  }),
+  z.object({
+    action: z.literal("migrate_legacy"),
   }),
   z.object({
     action: z.literal("code_run"),
@@ -77,6 +100,11 @@ const postSchema = z.discriminatedUnion("action", [
     timeoutSeconds: z.number().int().min(1).max(60).optional(),
   }),
 ]);
+
+async function requireAdmin(uid: string): Promise<boolean> {
+  if (!adminConfigured()) return false;
+  return hasPermission(adminDb(), uid, ADMIN_PERMISSION);
+}
 
 export async function POST(req: NextRequest) {
   const csrf = mutationCsrfResponse(req);
@@ -95,30 +123,37 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    if (body.action === "configure") {
+    // Admin-only lifecycle of the ONE shared Daytona configuration.
+    if (body.action === "configure" || body.action === "disconnect" || body.action === "migrate_legacy") {
       if (!adminConfigured()) {
         return NextResponse.json({ error: "DATABASE_NOT_CONFIGURED" }, { status: 503 });
       }
-      if (body.scope === "system") {
-        const isAdmin = await hasPermission(adminDb(), user.uid, "admin.settings.manage");
-        if (!isAdmin) return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
+      if (!(await requireAdmin(user.uid))) {
+        await auditDaytona(user.uid, body.action, "denied");
+        return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
       }
-      const status = await saveDaytonaConnection(user.uid, {
-        apiKey: body.apiKey,
-        target: body.target,
-        scope: body.scope ?? "user",
-      });
-      await auditDaytona(user.uid, "configure", "ok", body.scope ?? "user");
-      return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
-    }
 
-    if (body.action === "disconnect") {
-      if (!adminConfigured()) {
-        return NextResponse.json({ error: "DATABASE_NOT_CONFIGURED" }, { status: 503 });
+      if (body.action === "configure") {
+        const status = await saveDaytonaSystemConnection(user.uid, {
+          apiKey: body.apiKey,
+          target: body.target,
+        });
+        await auditDaytona(user.uid, "configure", "ok", "system");
+        return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
       }
-      const status = await deleteDaytonaConnection(user.uid);
-      await auditDaytona(user.uid, "disconnect", "ok");
-      return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+
+      if (body.action === "disconnect") {
+        const status = await deleteDaytonaSystemConnection();
+        await auditDaytona(user.uid, "disconnect", "ok", "system");
+        return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+      }
+
+      const { status, migrated } = await migrateLegacyDaytonaUserKey(user.uid);
+      await auditDaytona(user.uid, "migrate_legacy", "ok", migrated ? "promoted_user_key" : "purged_only");
+      return NextResponse.json(
+        { ...status, migrated },
+        { headers: { "Cache-Control": "no-store" } },
+      );
     }
 
     // Load optional owned project files so Daytona code/commands can run against workspace files
@@ -159,13 +194,13 @@ export async function POST(req: NextRequest) {
     try {
       const result =
         body.action === "code_run"
-          ? await runDaytonaCode(user.uid, {
+          ? await runDaytonaCode({
               code: body.code,
               language: body.language,
               projectFiles,
               timeoutSeconds: body.timeoutSeconds,
             })
-          : await runDaytonaCommand(user.uid, {
+          : await runDaytonaCommand({
               command: body.command,
               cwd: body.cwd,
               projectFiles,

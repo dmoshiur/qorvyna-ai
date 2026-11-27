@@ -166,7 +166,7 @@ toolRegistry.register({
 
 toolRegistry.register({
   id: "daytona.code_run",
-  description: "Execute TypeScript, JavaScript, or Python code inside an isolated Daytona Cloud Sandbox (@daytona/sdk) after explicit approval.",
+  description: "Execute TypeScript, JavaScript, or Python code inside the platform's isolated Daytona Cloud Sandbox (@daytona/sdk, configured by administrators) after explicit approval.",
   category: "projects",
   risk: RiskTier.MEDIUM,
   requiredPermissions: [],
@@ -190,7 +190,7 @@ toolRegistry.register({
       return { ok: true, data: { dry_run: true, language: input.language }, message: "Dry run: sandbox was not started." };
     }
     try {
-      const result = await runDaytonaCode(ctx.uid, {
+      const result = await runDaytonaCode({
         code: input.code,
         language: input.language,
         timeoutSeconds: input.timeout_seconds,

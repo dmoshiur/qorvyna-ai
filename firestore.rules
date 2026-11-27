@@ -62,7 +62,10 @@ service cloud.firestore {
     }
 
     match /daytona_connections/{uid} {
-      // Contains an encrypted Daytona API key; server routes only.
+      // LEGACY: Daytona moved to a single admin-managed system key
+      // (system_settings/daytona_sandbox). Leftover per-user keys are purged by
+      // the admin migration and account deletion; server routes only, no
+      // browser access.
       allow read, write: if false;
     }
 

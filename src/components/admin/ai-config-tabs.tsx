@@ -6,6 +6,8 @@
 //   Model     · the single QORVYNA model (GPT OSS 120B) — read-only status
 //   Accounts  · connected Groq accounts, live limits and rotation state
 //   Image     · image generation service (Together AI)
+//   Sandbox   · the ONE shared Daytona Cloud Sandbox configuration
+//   Updates   · phone app release management
 //   Usage     · real gateway call log
 //
 // Panels are code-split: opening AI configuration no longer downloads the
@@ -31,12 +33,16 @@ const AiUsagePanel = lazy(() =>
 const AppReleaseSettings = lazy(() =>
   import("@/components/admin/app-release-settings").then((m) => ({ default: m.AppReleaseSettings })),
 );
+const DaytonaAdminConnection = lazy(() =>
+  import("@/components/daytona-connection").then((m) => ({ default: m.DaytonaAdminConnection })),
+);
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "text", label: "AI model" },
   { id: "accounts", label: "Provider accounts" },
   { id: "image", label: "Image generation" },
+  { id: "sandbox", label: "Sandbox" },
   { id: "updates", label: "Phone & Updates" },
   { id: "usage", label: "Usage" },
 ] as const;
@@ -73,6 +79,7 @@ export function AiConfigTabs({ initialTab = "overview" }: { initialTab?: TabId }
         {tab === "text" ? <ModelsClient showChatLink={false} /> : null}
         {tab === "accounts" ? <ProviderAccounts /> : null}
         {tab === "image" ? <ImageProviderSettings /> : null}
+        {tab === "sandbox" ? <DaytonaAdminConnection /> : null}
         {tab === "updates" ? <AppReleaseSettings /> : null}
         {tab === "usage" ? <AiUsagePanel /> : null}
       </Suspense>

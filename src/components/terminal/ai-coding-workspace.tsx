@@ -19,7 +19,7 @@ import {
   Terminal as TerminalIcon,
 } from "lucide-react";
 import { Alert, Badge, Button, Card } from "@/components/ui";
-import { DaytonaConnection } from "@/components/daytona-connection";
+import { DaytonaSandboxPanel } from "@/components/daytona-connection";
 import { GithubConnection } from "@/components/github-connection";
 
 interface WorkspaceProjectSummary {
@@ -208,7 +208,7 @@ export function AiCodingWorkspace() {
         if (!res.ok) {
           throw new Error(
             data.error === "DAYTONA_NOT_CONFIGURED"
-              ? "Configure your Daytona API key in the Daytona tab first."
+              ? "Daytona Cloud Sandbox is not configured yet — an administrator can connect it in Admin → AI configuration → Sandbox."
               : data.error ?? `HTTP ${res.status}`,
           );
         }
@@ -570,7 +570,7 @@ export function AiCodingWorkspace() {
                 />
               ) : rightPane === "daytona" ? (
                 <div className="min-h-[340px] flex-1 overflow-y-auto">
-                  <DaytonaConnection projectId={activeProject?.id} />
+                  <DaytonaSandboxPanel projectId={activeProject?.id} />
                 </div>
               ) : rightPane === "github" ? (
                 <div className="min-h-[340px] flex-1 overflow-y-auto">
