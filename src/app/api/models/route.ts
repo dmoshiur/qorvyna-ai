@@ -5,7 +5,8 @@ import { getSessionUser } from "@/lib/firebase/session";
 import { qorvynaModelRoute, qorvynaModelStatus } from "@/lib/ai/config";
 import { QORVYNA_MODEL } from "@/lib/ai/model";
 import { providerPublicCode } from "@/lib/ai/provider-error";
-import { MAX_ACTIVE_MODELS, getPoolPreference, listModelStatus, setPoolPreference } from "@/lib/ai/models/pool";
+import { MAX_ACTIVE_MODELS, getPoolPreference, listModelStatus, probeModelForRefresh, setPoolPreference } from "@/lib/ai/models/pool";
+import { MODEL_REGISTRY } from "@/lib/ai/models/registry";
 import { providerLatencyStats } from "@/lib/ai/provider-latency";
 import { mutationCsrfResponse } from "@/lib/server/request-security";
 
@@ -35,6 +36,11 @@ export async function GET(request: Request) {
     }
   }
   const d = adminDb();
+  // "Refresh status" re-probes every configured model so each "Last verified"
+  // timestamp reflects a real, current connectivity check — not just badges.
+  if (check) {
+    await Promise.all(MODEL_REGISTRY.map((spec) => probeModelForRefresh(spec)));
+  }
   const [models, pool, settings] = await Promise.all([
     listModelStatus({ refresh: check }),
     getPoolPreference(d, user.uid),

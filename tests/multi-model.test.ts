@@ -422,6 +422,7 @@ describe("gateway end to end", () => {
   const realFetch = globalThis.fetch;
   let catalog: string[] = [];
   let failing = new Set<string>();
+  let rateLimited = new Set<string>();
   let requests: { model: string; stream: boolean; messages: AIMessage[]; auth: string }[] = [];
   let streamText: ((model: string) => string) | null = null;
 
@@ -430,6 +431,7 @@ describe("gateway end to end", () => {
     resetHealthCacheForTests();
     catalog = [QORVYNA_MODEL_ID, QWEN, LLAMA];
     failing = new Set();
+    rateLimited = new Set();
     requests = [];
     streamText = null;
     vi.stubEnv("GROQ_API_KEY", `gsk_multi_000000000000_${Math.random().toString(36).slice(2, 12)}`); // fresh key ⇒ fresh catalog cache
@@ -442,6 +444,7 @@ describe("gateway end to end", () => {
       const body = JSON.parse(String(init?.body)) as { model: string; stream?: boolean; messages: AIMessage[] };
       requests.push({ model: body.model, stream: body.stream === true, messages: body.messages, auth: String(new Headers(init?.headers).get("authorization")) });
       if (failing.has(body.model)) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503, headers: { "Content-Type": "application/json" } });
+      if (rateLimited.has(body.model)) return new Response(JSON.stringify({ error: { message: "rate_limit_exceeded", code: "rate_limit_exceeded" } }), { status: 429, headers: { "Content-Type": "application/json" } });
       if (body.stream) {
         const text = streamText?.(body.model) ?? `FINAL ANSWER by ${body.model}`;
         const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
@@ -632,6 +635,28 @@ describe("gateway end to end", () => {
     expect(JSON.stringify(result.run)).toMatch(/GPT OSS 120B could not take the implement stage \(provider_unavailable\); continuing with the next model/);
     const written = [...stub._state.docs.entries()].filter(([key, value]) => /\/files\//.test(key) && key.includes(String(result.projectId)) && String((value as { content?: string }).content ?? "").includes("Hearth Bakery"));
     expect(written.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("Agent build: a rate-limited lead switches to the next model instead of retrying it", async () => {
+    rateLimited = new Set([QORVYNA_MODEL_ID]);
+    const result = await build("mm-build-rate", "Knead");
+    expect(result.run.error, JSON.stringify(result.run.error)).toBeFalsy();
+    expect(result.run.status).toBe("succeeded");
+    expect(result.run.model?.model).not.toBe(QORVYNA_MODEL_ID);
+    // The lead was tried once and skipped; the build continued on another model.
+    const leadRequests = requests.filter((request) => request.model === QORVYNA_MODEL_ID).length;
+    expect(leadRequests).toBe(1);
+    expect(JSON.stringify(result.run)).toMatch(/continuing with the next model/);
+  });
+
+  it("Agent build: when every model is rate-limited the pause lists every model tried", async () => {
+    rateLimited = new Set([QORVYNA_MODEL_ID, QWEN, LLAMA]);
+    const result = await build("mm-build-rate-all", "Crust");
+    expect(result.run.status).toBe("paused");
+    expect(result.run.continuation?.reason).toBe("provider_unavailable");
+    const log = JSON.stringify(result.run);
+    expect(log).toContain("Tried every enabled model");
+    expect(log).toContain("Enable more models in AI model");
   });
 
   it("Agent build: when every model is down nothing is written and the failure is reported", async () => {

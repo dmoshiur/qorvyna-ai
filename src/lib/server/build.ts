@@ -25,8 +25,8 @@ import type { AIMessage } from "@/lib/ai/groq";
 import { completeWithModel, type CompletedAIResponse } from "@/lib/ai/executor";
 import { AIConfigurationError, type AIRouteTarget } from "@/lib/ai/config";
 import { resolvePool } from "@/lib/ai/models/pool";
-import { modelById, modelLabel, type ModelStrength } from "@/lib/ai/models/registry";
-import { completeWithRole } from "@/lib/ai/orchestrator/run";
+import { modelById, modelLabel } from "@/lib/ai/models/registry";
+import { completeWithFallback, fallbackBackoffMs, type ModelAttempt } from "@/lib/ai/orchestrator/run";
 import { QORVYNA_MODEL_LABEL } from "@/lib/ai/model";
 import {
   classifyDesignRevision, createDesignSpec, designFingerprint, designPlanPrompt, formatDesignSpecForPrompt, isWebsiteRequest,
@@ -60,6 +60,7 @@ import { AIProviderError } from "@/lib/ai/provider-error";
 import { nextAvailability } from "@/lib/ai/accounts";
 import { closeExecutionSession, filesDigest, heartbeatExecutionSession, openExecutionSession, type ExecutionSession } from "@/lib/server/execution-env";
 import { clearResumeState, saveResumeState, type ResumePhase, type ResumeState } from "@/lib/server/continuation";
+import { agentOpsHandle, agentOpsStart, getServerAgentOps } from "@/lib/agentops/server";
 
 export type ImageAssetRequest = { name: string; prompt: string };
 
@@ -112,6 +113,16 @@ const MAX_FIX_ATTEMPTS = 4;
 const RESUMABLE_FAILURES = new Set(["BUILD_FAILED", "DEPLOY_FAILED", "DEPLOY_INCOMPLETE", "DEPLOY_VERIFY_FAILED", "BUILD_RUN_FAILED", "BUILD_INCOMPLETE", "PUBLISH_RATE_LIMITED", "PROJECT_REVISION_CONFLICT"]);
 /** The build route may run for 300 s; leave room to validate, publish and persist. */
 const AI_BUDGET_MS = 235_000;
+/** Base delay between fallback attempts (5s, 15s, 45s, capped at 60s). */
+const FALLBACK_BACKOFF_BASE_MS = (() => {
+  const configured = Number(process.env.QORVYNA_FALLBACK_BACKOFF_MS);
+  if (Number.isFinite(configured) && configured >= 0) return configured;
+  return process.env.NODE_ENV === "test" ? 0 : 5_000;
+})();
+/** Non-blocking hint shown when the pool has no second model to fall back to. */
+const NO_FALLBACK_HINT = "No fallback model enabled — add at least one more model for resilience.";
+/** Suggested copy when every enabled model failed a stage. */
+const ADD_FALLBACK_HINT = "Enable more models in AI model -> Models to add fallback capacity.";
 
 /** Append the design-quality verdict to the provider's build report. */
 function withDesignQuality(report: BuildReport, files: ProjectFile[], spec: SiteDesignSpec | null): BuildReport {
@@ -157,6 +168,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
   const done = (run: BuildRun): BuildPipelineResult => ({ run, reply, projectId: resolvedProjectId });
   const aiDeadline = Date.now() + (input.aiBudgetMs ?? AI_BUDGET_MS);
   let designSpec: SiteDesignSpec | null = null;
+  let agentOpsExecId: string | null = null;
   const resumed = input.resume ?? null;
   const resumePhase: ResumePhase | null = resumed?.state.phase ?? null;
   let phase: ResumePhase = resumePhase ?? "generate";
@@ -174,6 +186,17 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
     now: now(),
   });
 
+  try {
+    agentOpsExecId = resumed ? `build_${runId}` : await agentOpsStart({
+      executionId: `build_${runId}`,
+      userId: user.uid,
+      conversationId: input.conversationId ?? undefined,
+      mode: "agent-build",
+      modelPool: [],
+    });
+  } catch {
+    agentOpsExecId = null;
+  }
   if (input.taskId && !resumed) await bindBuildTask(d, user, input.taskId, { project_id: null, build_run_id: runId });
   const emit = async (stage?: BuildStageId): Promise<void> => {
     await persist(d, runId, run, user.uid);
@@ -295,7 +318,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
   const providerOutage = (error: unknown): { outage: boolean; retryAt: number | null } => {
     const text = error instanceof Error ? error.message : "";
     const typed = error instanceof AIProviderError ? error : null;
-    const outage = typed ? typed.retryable : /rate[_ ]limit|provider_unavailable|timeout|network|empty_response|cool(?:ing)?[- ]?down|no model available|deadline/i.test(text);
+    const outage = typed ? typed.retryable : /rate[-_ ]?limit|provider_unavailable|timeout|network|empty_response|cool(?:ing)?[- ]?down|no model available|deadline/i.test(text);
     const model = run.model?.model ?? "";
     return { outage, retryAt: typed?.retryAt ?? (outage && model ? nextAvailability(model) : null) };
   };
@@ -406,6 +429,12 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
     // overwriting newer work. Each stage is one model's responsibility; when
     // that model cannot run, the next suitable enabled model takes the stage.
     let team: AIRouteTarget[] | null = null;
+    /**
+     * The full enabled + available pool in routing-priority order. This is the
+     * fallback chain: when the stage lead cannot run, the next model here takes
+     * over, and the build only pauses once every enabled model has failed.
+     */
+    let fallbackPool: AIRouteTarget[] = [];
     let teamDegraded: { wanted: string; used: string; detail: string } | null = null;
     let authorIndex = 0;
     const getTeam = async (): Promise<AIRouteTarget[]> => {
@@ -418,32 +447,108 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
       });
       teamDegraded = resolved.degraded;
       for (const skipped of resolved.skipped) note("generate", "warn", `${skipped.label} is enabled but not available: ${skipped.reason}`);
-      // Stages write or repair real project files, so only code-capable models take part.
-      const capable = resolved.targets.filter((target) => modelById(target.model)?.strengths.includes("coding"));
-      team = capable.length ? capable : resolved.targets.slice(0, 1);
+      // Every enabled model that is available now is a fallback candidate, in
+      // routing-priority order. Stages write or repair real project files, so
+      // the model team (who the Agent prompt names) stays code-capable.
+      fallbackPool = resolved.targets;
+      const capable = fallbackPool.filter((target) => modelById(target.model)?.strengths.includes("coding"));
+      team = capable.length ? capable : fallbackPool.slice(0, 1);
+      if (fallbackPool.length <= 1) note("generate", "info", NO_FALLBACK_HINT);
       return team;
     };
     // The Agent prompt names the models that are really doing this run.
     const agentPrompt = (): string => agentSystemPrompt(team?.length ? routingFromTargets(team) : undefined);
     type TeamStage = "design" | "implement" | "repair" | "review";
-    const STAGE_NEEDS: Record<TeamStage, readonly ModelStrength[]> = {
-      design: ["planning", "writing"],
-      implement: ["coding", "planning"],
-      repair: ["review", "coding", "reasoning"],
-      review: ["review", "writing", "coding"],
+
+    /** The stage lead first, then the rest of the pool in routing-priority order. */
+    const stageCandidates = (stage: TeamStage, members: AIRouteTarget[], pool: AIRouteTarget[]): AIRouteTarget[] => {
+      const base = pool.length ? pool : members;
+      if (stage === "implement") {
+        const lead = members[authorIndex] ?? base[0];
+        return lead ? [lead, ...base.filter((target) => target !== lead)] : base;
+      }
+      // Design, repair and review go to a different model than the author when
+      // one is enabled, so work is checked by a model that did not produce it.
+      const avoid = members[stage === "design" ? 0 : authorIndex];
+      if (avoid && base.length > 1) {
+        return [...base.filter((target) => target !== avoid), avoid];
+      }
+      return base;
     };
+
+    /** Record one model attempt as an AgentOps span (stage, model, error). */
+    const reportStageAttempt = (stage: TeamStage, stepId: string, attempt: ModelAttempt, index: number): void => {
+      if (!agentOpsExecId) return;
+      void agentOpsHandle({
+        type: "step.attempt",
+        executionId: agentOpsExecId,
+        agentId: getServerAgentOps().rootAgentId(agentOpsExecId),
+        stepId,
+        stage,
+        attempt: index + 1,
+        model: attempt.model,
+        label: attempt.label,
+        provider: modelById(attempt.model)?.providerLabel ?? "unknown",
+        outcome: attempt.outcome,
+        error: attempt.outcome === "ok" ? "" : attempt.detail,
+        at: now(),
+      });
+    };
+
+    /** Record the stage outcome so per-attempt spans can name the final model. */
+    const reportStageDone = (stage: TeamStage, stepId: string, completed: CompletedAIResponse | null, attempts: ModelAttempt[], startedAt: number): void => {
+      if (!agentOpsExecId) return;
+      void agentOpsHandle({
+        type: "step.done",
+        executionId: agentOpsExecId,
+        agentId: getServerAgentOps().rootAgentId(agentOpsExecId),
+        stepId,
+        status: completed ? "done" : "failed",
+        model: completed?.target.model ?? "unknown",
+        attempts,
+        durationMs: Math.max(1, now() - startedAt),
+        usage: completed?.response.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        detail: completed ? "" : attempts.map((attempt) => `${attempt.label}: ${attempt.detail}`).join("; "),
+        finishedAt: now(),
+      });
+    };
+
+    type StageFallback = { stage: TeamStage; attempts: ModelAttempt[] };
+    const stageFallbackOf = (error: unknown): StageFallback | null => {
+      const tagged = error as Error & { stageFallback?: StageFallback };
+      return tagged?.stageFallback ?? null;
+    };
+    const stageFallbackError = (stage: TeamStage, attempts: ModelAttempt[]): Error => {
+      const error = new Error(attempts.map((attempt) => `${attempt.label}: ${attempt.detail}`).join("; ") || "no model available");
+      (error as Error & { stageFallback?: StageFallback }).stageFallback = { stage, attempts };
+      return error;
+    };
+    /** Human-readable list of every model tried for a stage and why each failed. */
+    const fallbackSummary = (error: unknown): string => {
+      const fb = stageFallbackOf(error);
+      if (!fb) return "";
+      return `Tried every enabled model: ${fb.attempts.map((attempt) => `${attempt.label} (${attempt.detail || "error"})`).join("; ")}.`;
+    };
+
     const completeAs = async (stage: TeamStage, request: Parameters<typeof completeWithModel>[1]): Promise<CompletedAIResponse> => {
       const members = await getTeam();
       if (!members.length) throw new AIConfigurationError(true);
-      // The lead writes the files. Design, repair and review go to a
-      // different model when one is enabled, so work is checked by a model
-      // that did not produce it.
-      const options = stage === "implement" ? { prefer: authorIndex } : members.length > 1 ? { avoid: stage === "design" ? 0 : authorIndex } : {};
-      const { completed, attempts } = await completeWithRole(members, STAGE_NEEDS[stage], request, { ...options, maxWaitMs: 8_000 });
+      const candidates = stageCandidates(stage, members, fallbackPool);
+      const stepId = `build-${stage}`;
+      const startedAt = now();
+      // Walk the enabled + available pool in routing-priority order. A provider
+      // error moves on to the next model; only when all of them fail does this
+      // throw, and the caller pauses the build with the full list of attempts.
+      const { completed, attempts } = await completeWithFallback(candidates, () => request, {
+        maxWaitMs: 8_000,
+        backoffMs: FALLBACK_BACKOFF_BASE_MS,
+        onAttempt: (attempt, index) => reportStageAttempt(stage, stepId, attempt, index),
+      });
       for (const attempt of attempts) {
         if (attempt.outcome !== "ok") note(stage === "repair" || stage === "review" ? "validate" : "generate", "warn", `${attempt.label} could not take the ${stage} stage (${attempt.detail}); continuing with the next model.`);
       }
-      if (!completed) throw new Error(attempts.map((attempt) => `${attempt.label}: ${attempt.detail}`).join("; ") || "no model available");
+      reportStageDone(stage, stepId, completed, attempts, startedAt);
+      if (!completed) throw stageFallbackError(stage, attempts);
       if (stage === "implement") authorIndex = Math.max(0, members.indexOf(completed.target));
       if (members.length > 1) note(stage === "repair" || stage === "review" ? "validate" : "generate", "info", `${stage[0].toUpperCase()}${stage.slice(1)}: ${modelLabel(completed.target.model)}.`);
       return completed;
@@ -604,7 +709,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
           const timedOut = Date.now() >= aiDeadline - 5_000;
           return await pause(timedOut ? "time_limit" : "provider_unavailable",
             timedOut ? "This session's time ran out while the files were being written. The request is saved and continues automatically."
-              : `The AI provider is not available right now (${detail.slice(0, 140)}). The request is saved and continues automatically when a model is available.`,
+              : `The AI provider is not available right now. ${fallbackSummary(error) || `(${detail.slice(0, 140)})`} ${ADD_FALLBACK_HINT} The request is saved and continues automatically when a model is available.`,
             failure.retryAt, [], "generate");
         }
         return await abort("AI_PROVIDER_FAILED", `${routes.length > 1 ? "None of the enabled models" : modelLabel(routes[0].model)} could produce the files: ${detail.slice(0, 200)}. No files were written and the project is unchanged — retry when the provider is available.`, "generate");
@@ -859,6 +964,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
     let repairStop: ReturnType<typeof repairStopCopy> = "";
     let repairRetryAt: number | null = null;
     let repairPaused: "time_limit" | "provider_unavailable" | null = null;
+    let lastProviderError: unknown = null;
     if (canRepair && (built.report.blocking || deployVerdict(built.report).repairable.length)) {
       const hasTeam = (await getTeam()).length > 0;
       const model: RepairModel = async (request) => {
@@ -876,7 +982,6 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
         return parseAgentResponse(fix.response.content ?? "", { allowUnlabelledFences: true, allowRawHtmlDocument: request.targets.length === 1 }).files;
       };
       let checkpointed = false;
-      let lastProviderError: unknown = null;
       const guardedModel: RepairModel = async (request) => {
         try { return await model(request); }
         catch (error) { lastProviderError = error; throw error; }
@@ -1013,7 +1118,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
         return await pause(repairPaused,
           repairPaused === "time_limit"
             ? `This session's time ran out with ${verdict.blockers.length || built.report.errors} problem${(verdict.blockers.length || built.report.errors) === 1 ? "" : "s"} still being repaired. Progress is saved and the repair continues automatically.`
-            : "The AI provider became unavailable during the repair. Progress is saved and the repair continues automatically when a model is available.",
+            : `The AI provider became unavailable during the repair. ${fallbackSummary(lastProviderError) || ""}${fallbackSummary(lastProviderError) ? ` ${ADD_FALLBACK_HINT} ` : ""}Progress is saved and the repair continues automatically when a model is available.`,
           repairRetryAt, unresolved, "validate");
       }
       if (!input.allowOverride) {

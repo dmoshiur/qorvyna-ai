@@ -90,6 +90,20 @@ export type AgentOpsEvent =
       finishedAt: number;
     }
   | {
+      type: "step.attempt";
+      executionId: string;
+      agentId: string;
+      stepId: string;
+      stage: string;
+      attempt: number;
+      model: string;
+      label: string;
+      provider: string;
+      outcome: "ok" | "skipped" | "failed";
+      error: string;
+      at: number;
+    }
+  | {
       type: "tool.call";
       executionId: string;
       agentId: string;
@@ -256,6 +270,19 @@ export type StepRecord = {
   detail?: string;
 };
 
+/** One attempt at a model step, including why a model did not take the stage. */
+export type StepAttemptRecord = {
+  stepId: string;
+  stage: string;
+  attempt: number;
+  model: string;
+  label: string;
+  provider: string;
+  outcome: "ok" | "skipped" | "failed";
+  error: string;
+  at: number;
+};
+
 /** A child agent spawned by a parent (recursive loop visualization). */
 export type AgentNode = {
   agentId: string;
@@ -317,6 +344,7 @@ export type ExecutionRecord = {
   totalDurationMs?: number;
   agents: AgentNode[];
   steps: StepRecord[];
+  stepAttempts: StepAttemptRecord[];
   toolCalls: ToolCallRecord[];
   pendingApprovals: PendingApproval[];
   loops: LoopEvent[];

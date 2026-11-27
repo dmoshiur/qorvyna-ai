@@ -41,6 +41,7 @@ import { QorvynaMark } from "@/components/logo";
 import { useToast } from "@/components/toast";
 import { ServerProblem } from "@/components/server-problem";
 import { ConfirmModal } from "@/components/modal";
+import { GithubConnection } from "@/components/github-connection";
 import { classifyGatewayResponse, classifyRequestException, failureCopy, withRequestReference, type ApiFailure } from "@/lib/api-errors";
 import { useI18n } from "@/lib/i18n/client";
 import { useHydrated } from "@/lib/client/use-hydrated";
@@ -193,8 +194,19 @@ const AGENT_SUGGESTIONS = [
   { icon: <Code2 size={15} strokeWidth={1.5} />, label: "Build a responsive website", prompt: "Build a polished responsive website from my description. Start by asking only for the one most important missing requirement." },
   { icon: <FileSearch size={15} strokeWidth={1.5} />, label: "Fix an attached project", prompt: "Review the attached project files, identify the root cause, and return complete corrected files." },
   { icon: <MonitorPlay size={15} strokeWidth={1.5} />, label: "Create a live prototype", prompt: "Create a self-contained HTML, CSS and JavaScript prototype that I can open in Live Preview." },
-  { icon: <Code2 size={15} strokeWidth={1.5} />, label: "Prepare a GitHub change", prompt: "Prepare a focused, production-ready code change with complete files and a verification checklist." },
+  { icon: <Code2 size={15} strokeWidth={1.5} />, label: "Prepare a GitHub change", desc: "Scope a change, then push", action: "github_change" },
 ];
+
+/**
+ * "Prepare a GitHub change" is a push intent, not a bare chat prompt. With no
+ * project it starts a create-mode build (push becomes available once the build
+ * is reviewed); with projects it opens the picker and scopes the prompt to the
+ * chosen project. The actual push always goes through the Connect GitHub panel.
+ */
+const GITHUB_CHANGE_CREATE_PROMPT =
+  "Create a new project from scratch that I can prepare a focused, production-ready change for. Build it and I will review it before pushing to GitHub.";
+const githubChangePromptFor = (title: string) =>
+  `Prepare a focused, production-ready change to project ${title}: describe the files and behaviour you want changed, and I will return complete files plus a verification checklist.`;
 
 async function parseErrorCode(res: Response): Promise<string | null> {
   try {
@@ -356,6 +368,10 @@ export function ChatClient({
   const [agentProjectId, setAgentProjectId] = useState<string | null>(initialProjectId ?? (initialConvId ? null : latestProjectId(initialMessages)));
   const explicitAgentProjectIdRef = useRef<string | null>(null);
   const [projectChoices, setProjectChoices] = useState<Array<{ id: string; title: string }>>([]);
+  /** Scope template for the "Prepare a GitHub change" preset (per chosen project). */
+  const githubChangeTemplateRef = useRef<((title: string) => string) | null>(null);
+  /** Show the Connect GitHub panel before a push when GitHub is not connected. */
+  const [githubPanelOpen, setGithubPanelOpen] = useState(false);
   // "Awaiting approval": executable work requested in a conversation mode.
   const [handoff, setHandoff] = useState<PendingHandoff | null>(null);
   const lastBuildIntentRef = useRef<BuildIntent | null>(null);
@@ -2125,6 +2141,47 @@ export function ChatClient({
   }
 
   /**
+   * "Prepare a GitHub change" preset. This is a push intent, so it must never
+   * dead-end in a bare "please provide files" reply:
+   *   • no projects      → start a create-mode build (push comes after review);
+   *   • projects exist   → open the project picker and scope the prompt;
+   *   • GitHub not connected → show the Connect GitHub panel before any push.
+   */
+  async function prepareGitHubChange() {
+    setNotice(null);
+    setFailure(null);
+    githubChangeTemplateRef.current = null;
+    setGithubPanelOpen(false);
+    switchMode("agent");
+    const projects = await rpc<Array<{ id: string; title: string }>>("project_list").catch(() => [] as Array<{ id: string; title: string }>);
+    if (!projects.length) {
+      setNotice("No projects yet — I'll start a new build. GitHub push becomes available after the build is reviewed.");
+      void send(undefined, GITHUB_CHANGE_CREATE_PROMPT);
+      return;
+    }
+    // Projects exist: open the picker and prepare a scoped, build-ready prompt
+    // for whichever project the user chooses. The Connect GitHub panel is
+    // shown alongside the picker so a push is never attempted unconnected.
+    githubChangeTemplateRef.current = githubChangePromptFor;
+    lastBuildPromptRef.current = githubChangePromptFor(projects[0].title);
+    lastBuildIntentRef.current = {
+      ...NO_BUILD_INTENT,
+      build: true,
+      publish: false,
+      preview: true,
+      fix: false,
+      modify: true,
+      explicit: true,
+      needsClarification: false,
+      clarification: null,
+      signals: ["Prepare a GitHub change preset"],
+    };
+    setProjectChoices(projects);
+    setGithubPanelOpen(true);
+    setNotice("Choose the project to change. I'll prepare a focused, production-ready change scoped to it.");
+  }
+
+  /**
    * Run the real build pipeline for one user turn (§24). The chat shows the
    * server's stage state, never a simulated one, and the publish popup only
    * appears when the hosting provider reported a live deployment.
@@ -3016,6 +3073,7 @@ export function ChatClient({
                         // Agent is a mode of this conversation, not another page.
                         if ("href" in suggestion && suggestion.href) { if (isTemporary) router.push(suggestion.href); else switchMode("agent"); }
                         else if ("action" in suggestion && suggestion.action === "attach") fileRef.current?.click();
+                        else if ("action" in suggestion && suggestion.action === "github_change") void prepareGitHubChange();
                         else if (suggestion.prompt) void send(undefined, suggestion.prompt);
                       }}
                       className="suggest-card"
@@ -3114,7 +3172,9 @@ export function ChatClient({
                         setAgentProjectId(choice.id);
                         setProjectChoices([]);
                         // The request that was blocked on this choice runs now.
-                        const prompt = lastBuildPromptRef.current;
+                        const template = githubChangeTemplateRef.current;
+                        githubChangeTemplateRef.current = null;
+                        const prompt = template ? template(choice.title) : lastBuildPromptRef.current;
                         const waiting = lastBuildIntentRef.current;
                         if (prompt && waiting && !streaming) {
                           setFailure(null);
@@ -3129,6 +3189,7 @@ export function ChatClient({
                 </div>
               </div>
             ) : null}
+            {githubPanelOpen ? <GithubConnection showPush /> : null}
           </div>
         </div>
         {chatScroll.newBelow ? (

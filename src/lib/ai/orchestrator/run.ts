@@ -74,19 +74,32 @@ export function contextBudget(target: AIRouteTarget, maxTokens: number): number 
   return Math.max(600, Math.min(window - maxTokens - 512, Math.floor((spec?.tpm ?? 6_000) * 0.5) - maxTokens, 6_000));
 }
 
+/** Exponential backoff between fallback attempts (5s → 15s → 45s, capped). */
+export function fallbackBackoffMs(attemptIndex: number, baseMs: number): number {
+  if (!baseMs || baseMs <= 0 || attemptIndex <= 0) return 0;
+  return Math.min(baseMs * 3 ** (attemptIndex - 1), 60_000);
+}
+
 /**
  * Run one request against the first candidate that can take it.
- * Candidates are tried in order; each attempt is recorded.
+ * Candidates are tried in order; each attempt is recorded and, when
+ * `backoffMs` is supplied, a provider failure waits before the next model is
+ * tried so a single-model setup can recover without hammering the provider.
  */
 export async function completeWithFallback(
   candidates: readonly AIRouteTarget[],
   build: (target: AIRouteTarget) => CompleteRequest,
-  opts: { signal?: AbortSignal; complete?: CompleteFn; maxWaitMs?: number } = {},
+  opts: { signal?: AbortSignal; complete?: CompleteFn; maxWaitMs?: number; backoffMs?: number; onAttempt?: (attempt: ModelAttempt, index: number) => void } = {},
 ): Promise<{ completed: CompletedAIResponse | null; attempts: ModelAttempt[] }> {
   const complete = opts.complete ?? completeWithModel;
   const attempts: ModelAttempt[] = [];
   const deferred: AIRouteTarget[] = [];
-  for (const target of candidates) {
+  const note = (attempt: ModelAttempt, index: number): void => {
+    attempts.push(attempt);
+    opts.onAttempt?.(attempt, index);
+  };
+  for (let index = 0; index < candidates.length; index += 1) {
+    const target = candidates[index];
     if (opts.signal?.aborted) break;
     const label = modelLabel(target.model);
     const request = build(target);
@@ -97,22 +110,25 @@ export async function completeWithFallback(
       reservation = reserveTokens(keyOf(target), estimate);
     }
     if (!reservation.ok) {
-      attempts.push({
+      note({
         model: target.model, label, outcome: "skipped",
         detail: reservation.reason === "cooldown" ? "rate-limited by the provider" : reservation.reason === "too_large" ? "request is larger than this model's per-minute token budget" : "per-minute token budget is in use",
-      });
+      }, index);
       if (reservation.reason !== "cooldown") deferred.push(target);
       continue;
     }
     try {
       const completed = await complete([target], request);
       reservation.release(completed.response.usage?.totalTokens);
-      attempts.push({ model: target.model, label, outcome: "ok", detail: "" });
+      note({ model: target.model, label, outcome: "ok", detail: "" }, index);
       return { completed, attempts };
     } catch (error) {
       if (opts.signal?.aborted) throw error;
       if (error instanceof AIProviderError && error.type === "rate_limit") coolDown(keyOf(target), error.retryAt ? Math.max(1_000, error.retryAt - Date.now()) : 30_000);
-      attempts.push({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" });
+      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, index);
+      // Wait before the next model takes over so a transient provider limit
+      // can clear instead of the fallback hammering the same endpoint.
+      if (opts.backoffMs) await sleep(fallbackBackoffMs(index, opts.backoffMs), opts.signal);
     }
   }
   // The scheduler steers work between models; it is not allowed to turn a
@@ -123,12 +139,12 @@ export async function completeWithFallback(
     const label = modelLabel(target.model);
     try {
       const completed = await complete([target], build(target));
-      attempts.push({ model: target.model, label, outcome: "ok", detail: "" });
+      note({ model: target.model, label, outcome: "ok", detail: "" }, 0);
       return { completed, attempts };
     } catch (error) {
       if (opts.signal?.aborted) throw error;
       if (error instanceof AIProviderError && error.type === "rate_limit") coolDown(keyOf(target), error.retryAt ? Math.max(1_000, error.retryAt - Date.now()) : 30_000);
-      attempts.push({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" });
+      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, 0);
     }
   }
   return { completed: null, attempts };
@@ -139,7 +155,7 @@ export async function completeWithRole(
   pool: readonly AIRouteTarget[],
   needs: readonly ModelStrength[],
   request: CompleteRequest,
-  opts: { signal?: AbortSignal; complete?: CompleteFn; prefer?: number; avoid?: number; maxWaitMs?: number } = {},
+  opts: { signal?: AbortSignal; complete?: CompleteFn; prefer?: number; avoid?: number; maxWaitMs?: number; backoffMs?: number; onAttempt?: (attempt: ModelAttempt, index: number) => void } = {},
 ): Promise<{ completed: CompletedAIResponse | null; attempts: ModelAttempt[] }> {
   let order = rankForNeeds(pool, needs);
   if (opts.avoid !== undefined && order.length > 1) order = [...order.filter((index) => index !== opts.avoid), opts.avoid];
