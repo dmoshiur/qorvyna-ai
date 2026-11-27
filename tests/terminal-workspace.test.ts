@@ -156,4 +156,108 @@ describe("Priority 3: Built-in AI Terminal (qsh) & Governed Coding Workspace", (
     const same = computeUnifiedFileDiff("app.js", "same", "same");
     expect(same.changeType).toBe("unchanged");
   });
+
+  it("initializes a project with files at the workspace root (no /docs or /web) and resolves that root", async () => {
+    const { adapter } = makeInMemoryAdapter([
+      { path: "index.html", content: "<h1>Root project</h1>", encoding: "utf8", language: "html" },
+      { path: "learn.html", content: "<h1>Learn</h1>", encoding: "utf8", language: "html" },
+    ]);
+
+    // A fresh agent-generated project with index.html at the root must never
+    // hit PROJECT_INIT_ERROR: init resolves the actual workspace root.
+    const lsRes = await executeWorkspaceCommand("ls", adapter);
+    expect(lsRes.exitCode).toBe(0);
+    expect(lsRes.stdout).toContain("index.html");
+    expect(lsRes.stdout).toContain("learn.html");
+    expect(lsRes.stderr).not.toContain("PROJECT_INIT_ERROR");
+
+    const pwdRes = await executeWorkspaceCommand("pwd", adapter);
+    expect(pwdRes.stdout.trim()).toBe("/workspace/projects/proj_ws_1");
+
+    const envRes = await executeWorkspaceCommand("env", adapter);
+    expect(envRes.stdout).toContain("QORVYNA_PROJECT_ROOT=/workspace/projects/proj_ws_1");
+    expect(envRes.stdout).toContain("QORVYNA_PROJECT_FS_ROOT=projects/proj_ws_1/files");
+
+    const catRes = await executeWorkspaceCommand("cat index.html", adapter);
+    expect(catRes.exitCode).toBe(0);
+    expect(catRes.stdout).toContain("Root project");
+  });
+
+  it("runs compound && input sequentially and renders one labeled combined output", async () => {
+    const { adapter } = makeInMemoryAdapter([
+      { path: "index.html", content: "<h1>Root project</h1>", encoding: "utf8", language: "html" },
+    ]);
+
+    const res = await executeWorkspaceCommand("ls && cat index.html", adapter);
+    expect(res.exitCode).toBe(0);
+    expect(res.program).toBe("compound");
+    expect(res.stdout).toContain("[1/2] $ ls");
+    expect(res.stdout).toContain("[2/2] $ cat index.html");
+    expect(res.stdout).toContain("index.html");
+    expect(res.stdout).toContain("Root project");
+  });
+
+  it("refuses only the non-permitted part of a compound chain and stops", async () => {
+    const { adapter } = makeInMemoryAdapter([
+      { path: "index.html", content: "<h1>Root project</h1>", encoding: "utf8", language: "html" },
+    ]);
+
+    // ls runs; curl is refused; pwd after it must never run.
+    const res = await executeWorkspaceCommand("ls && curl --version && pwd", adapter);
+    expect(res.exitCode).toBe(126);
+    expect(res.stdout).toContain("[1/3] $ ls");
+    expect(res.stdout).toContain("index.html");
+    expect(res.stdout).not.toContain("[3/3]");
+    expect(res.stdout).not.toContain("/workspace/projects");
+    expect(res.stderr).toContain("[2/3]");
+    expect(res.stderr).toContain("COMMAND_NOT_PERMITTED_IN_SANDBOX");
+    expect(res.stderr).toContain("curl");
+  });
+
+  it("stops a compound chain at a path-escape rejection", async () => {
+    const { adapter } = makeInMemoryAdapter([
+      { path: "index.html", content: "<h1>Root project</h1>", encoding: "utf8", language: "html" },
+    ]);
+
+    const res = await executeWorkspaceCommand("cat index.html && cat ../secret && pwd", adapter);
+    expect(res.exitCode).toBe(1);
+    expect(res.stdout).toContain("[1/3] $ cat index.html");
+    expect(res.stdout).toContain("Root project");
+    expect(res.stdout).not.toContain("[3/3]");
+    expect(res.stderr).toContain("[2/3]");
+    expect(res.stderr).toContain("PATH_ESCAPE_BLOCKED");
+    expect(res.stderr).toContain("'..'");
+  });
+
+  it("refuses a compound part with unsupported shell metacharacters", async () => {
+    const { adapter } = makeInMemoryAdapter([
+      { path: "index.html", content: "<h1>Root project</h1>", encoding: "utf8", language: "html" },
+    ]);
+
+    const res = await executeWorkspaceCommand("ls; cat index.html | grep h1", adapter);
+    expect(res.exitCode).toBe(2);
+    expect(res.stdout).toContain("[1/2] $ ls");
+    expect(res.stderr).toContain("[2/2]");
+    expect(res.stderr).toContain("SHELL_METACHAR_BLOCKED");
+  });
+
+  it("names the exact offending segment on path escape attempts", async () => {
+    const { adapter } = makeInMemoryAdapter([
+      { path: "index.html", content: "<h1>Root project</h1>", encoding: "utf8", language: "html" },
+    ]);
+
+    const res = await executeWorkspaceCommand("cat ../../etc/passwd", adapter);
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("PATH_ESCAPE_BLOCKED");
+    expect(res.stderr).toContain("'..'");
+    expect(res.stderr).toContain("Run 'help' for the project layout.");
+  });
+
+  it("help documents root resolution and governed compound input", async () => {
+    const { adapter } = makeInMemoryAdapter([]);
+    const res = await executeWorkspaceCommand("help", adapter);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("/docs and /web are optional conventions");
+    expect(res.stdout).toContain("Compound input");
+  });
 });

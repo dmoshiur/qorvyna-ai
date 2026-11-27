@@ -43,7 +43,7 @@ import { isImageGenerationConfigured } from "@/lib/ai/image/config";
 import { applyProjectFiles, ensureAgentProject, loadProjectFiles, saveProjectVersion } from "@/lib/server/projects";
 import { bindConversationProject, resolveProjectContext } from "@/lib/server/project-resolution";
 import { appendCheckpoint, bindBuildTask, syncBuildTask, type CheckpointStep } from "@/lib/server/agent-tasks";
-import { PROJECT_LIMITS, type ProjectFile } from "@/lib/projects/paths";
+import { PROJECT_LIMITS, projectRootFor, type ProjectFile } from "@/lib/projects/paths";
 import {
   LEASE_SLACK_MS, applyStaleness, beginStage, buildRunCopy, cancelRun, completeStage, createBuildRun, failRun, failStage, runLiveness,
   setDeployment, setChanges, setPreviewUrl, setValidation, skipStage, stageProgress, succeedRun,
@@ -407,7 +407,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
     }
     const executionContext = {
       ownerId: user.uid, chatId: input.conversationId ?? null, projectId,
-      mode: resolution.mode, projectRoot: `projects/${projectId}/files`,
+      mode: resolution.mode, projectRoot: projectRootFor(projectId),
       sourceRevision, manifest: Array.isArray(projectRecord.file_manifest)
         ? projectRecord.file_manifest : before.map((file) => ({ path: file.path })),
       build: { framework: String(projectRecord.framework ?? "html"), command: String(projectRecord.build_command ?? "QORVYNA static bundler"), entry: String(projectRecord.entry_point ?? "none") },

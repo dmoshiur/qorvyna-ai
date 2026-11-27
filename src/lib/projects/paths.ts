@@ -7,6 +7,28 @@ export const PROJECT_LIMITS = {
   maxImageBytesPerProject: 5 * 1024 * 1024,
 };
 
+/**
+ * Canonical project workspace layout — the SINGLE source of truth shared by
+ * the qsh terminal, the agent build pipeline (plan → generate → build →
+ * validate → publish), preview, deploy and GitHub push.
+ *
+ * Project files live at the workspace root (`projects/<id>/files`), so a
+ * freshly generated project with `index.html` at the root is valid.
+ */
+export const PROJECT_ROOT_LAYOUT = "projects/<projectId>/files";
+
+/**
+ * Optional conventions some scaffolds place at the workspace root. Project
+ * init NEVER requires either: the project's actual root, as stored by the
+ * project workspace, is always accepted.
+ */
+export const OPTIONAL_ROOT_CONVENTIONS = ["docs", "web"] as const;
+
+/** Resolve the canonical stored project root for a project id. */
+export function projectRootFor(projectId: string): string {
+  return `projects/${projectId}/files`;
+}
+
 export const TEXT_EXTENSIONS = new Set([
   "html", "htm", "css", "scss", "sass", "less", "js", "mjs", "cjs", "jsx", "ts", "tsx",
   "json", "jsonc", "svg", "txt", "md", "mdx", "xml", "csv", "yml", "yaml", "toml",

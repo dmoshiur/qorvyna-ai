@@ -25,6 +25,7 @@ import {
   executeWorkspaceCommand,
   type TerminalProjectAdapter,
 } from "@/lib/terminal/engine";
+import { offendingSegmentFromError, projectInitError } from "@/lib/terminal/project-init";
 import { getServerAgentOps } from "@/lib/agentops/server";
 
 export const runtime = "nodejs";
@@ -115,30 +116,109 @@ export async function POST(req: NextRequest) {
 
   try {
     if (body.action === "init_project") {
-      const created = await ensureProject(db, user, { title: body.title, forceNew: true });
-      await applyProjectFiles(db, user, {
-        project_id: created.id,
-        source: "user",
-        files: [
-          withLanguage({
-            path: "index.html",
-            content: `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <title>${body.title}</title>\n  <link rel="stylesheet" href="styles.css" />\n</head>\n<body>\n  <main class="shell">\n    <h1>${body.title}</h1>\n    <p>Managed inside QORVYNA AI Coding Workspace.</p>\n  </main>\n  <script src="app.js"></script>\n</body>\n</html>\n`,
-            encoding: "utf8",
-          }),
-          withLanguage({
-            path: "styles.css",
-            content: `:root { color-scheme: dark; }\nbody { font-family: system-ui, sans-serif; margin: 0; padding: 2.5rem; background: #0b1020; color: #f1f5f9; }\n.shell { max-width: 44rem; margin: 0 auto; }\n`,
-            encoding: "utf8",
-          }),
-          withLanguage({
-            path: "app.js",
-            content: `console.log("QORVYNA workspace ready");\n`,
-            encoding: "utf8",
-          }),
-        ],
+      const initStartedAt = Date.now();
+      const executionId = await agentops.start({
+        userId: user.uid,
+        mode: "terminal_init",
+        modelPool: [QORVYNA_MODEL_ID],
       });
-      const loaded = await getProject(db, user, created.id);
-      return NextResponse.json({ activeProject: loaded.project, files: loaded.files });
+      const rootAgentId = agentops.rootAgentId(executionId);
+      const initArgsHash = crypto
+        .createHash("sha256")
+        .update(`init:${body.title}`)
+        .digest("hex")
+        .slice(0, 16);
+
+      try {
+        const created = await ensureProject(db, user, { title: body.title, forceNew: true });
+        await applyProjectFiles(db, user, {
+          project_id: created.id,
+          source: "user",
+          files: [
+            withLanguage({
+              path: "index.html",
+              content: `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <title>${body.title}</title>\n  <link rel="stylesheet" href="styles.css" />\n</head>\n<body>\n  <main class="shell">\n    <h1>${body.title}</h1>\n    <p>Managed inside QORVYNA AI Coding Workspace.</p>\n  </main>\n  <script src="app.js"></script>\n</body>\n</html>\n`,
+              encoding: "utf8",
+            }),
+            withLanguage({
+              path: "styles.css",
+              content: `:root { color-scheme: dark; }\nbody { font-family: system-ui, sans-serif; margin: 0; padding: 2.5rem; background: #0b1020; color: #f1f5f9; }\n.shell { max-width: 44rem; margin: 0 auto; }\n`,
+              encoding: "utf8",
+            }),
+            withLanguage({
+              path: "app.js",
+              content: `console.log("QORVYNA workspace ready");\n`,
+              encoding: "utf8",
+            }),
+          ],
+        });
+        const loaded = await getProject(db, user, created.id);
+      const initFinishedAt = Date.now();
+      const initDurationMs = Math.max(1, initFinishedAt - initStartedAt);
+        agentops.evaluate({
+          type: "tool.call",
+          executionId,
+          agentId: rootAgentId,
+          toolId: "qsh.init_project",
+          argsHash: initArgsHash,
+          risk: "write",
+          approvalRequired: false,
+          startedAt: initStartedAt,
+        });
+        agentops.evaluate({
+          type: "tool.result",
+          executionId,
+          agentId: rootAgentId,
+          toolId: "qsh.init_project",
+          ok: true,
+          durationMs: initDurationMs,
+          finishedAt: initFinishedAt,
+        });
+        agentops.evaluate({
+          type: "execution.end",
+          executionId,
+          status: "completed",
+          outcome: "success",
+          totalDurationMs: initDurationMs,
+          endedAt: initFinishedAt,
+        });
+        await agentops.persist(executionId);
+        return NextResponse.json({ activeProject: loaded.project, files: loaded.files });
+      } catch (err) {
+        const initFinishedAt = Date.now();
+        const initDurationMs = Math.max(1, initFinishedAt - initStartedAt);
+        const message = err instanceof Error ? err.message : "PROJECT_INIT_ERROR";
+        agentops.evaluate({
+          type: "tool.call",
+          executionId,
+          agentId: rootAgentId,
+          toolId: "qsh.init_project",
+          argsHash: initArgsHash,
+          risk: "write",
+          approvalRequired: false,
+          startedAt: initStartedAt,
+        });
+        agentops.evaluate({
+          type: "tool.result",
+          executionId,
+          agentId: rootAgentId,
+          toolId: "qsh.init_project",
+          ok: false,
+          error: projectInitError(offendingSegmentFromError(message)),
+          durationMs: initDurationMs,
+          finishedAt: initFinishedAt,
+        });
+        agentops.evaluate({
+          type: "execution.end",
+          executionId,
+          status: "failed",
+          outcome: "tool_failure",
+          totalDurationMs: initDurationMs,
+          endedAt: initFinishedAt,
+        });
+        await agentops.persist(executionId);
+        throw err;
+      }
     }
 
     if (body.action === "save_file") {

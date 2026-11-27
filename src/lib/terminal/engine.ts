@@ -16,10 +16,17 @@
 
 import crypto from "node:crypto";
 import vm from "node:vm";
-import { assertSafeProjectPath, type ProjectFile } from "@/lib/projects/paths";
-import { languageForPath } from "@/lib/ai/agent";
+import { type ProjectFile } from "@/lib/projects/paths";
+import { languageForPath, safeAgentPath } from "@/lib/ai/agent";
 import { validateProject } from "@/lib/deploy/validate";
 import { scrubSecrets } from "@/lib/agentops/governance";
+import {
+  offendingSegmentFromError,
+  pathEscapeError,
+  projectInitError,
+  resolveTerminalProjectRoot,
+  storedProjectRoot,
+} from "@/lib/terminal/project-init";
 
 export interface TerminalProjectState {
   projectId: string;
@@ -58,6 +65,92 @@ function capOutput(text: string): string {
   const scrubbed = scrubSecrets(text);
   if (scrubbed.length <= MAX_OUTPUT_CHARS) return scrubbed;
   return `${scrubbed.slice(0, MAX_OUTPUT_CHARS)}\n… [output truncated at ${MAX_OUTPUT_CHARS} chars]`;
+}
+
+/**
+ * Programs qsh may execute. The governance allowlist categories are unchanged:
+ * no git, no network/fetch, no host OS binaries. Compound input is split into
+ * parts, but every part must still resolve to one of these programs.
+ */
+const ALLOWED_PROGRAMS = new Set([
+  "help",
+  "pwd",
+  "env",
+  "whoami",
+  "ls",
+  "cat",
+  "head",
+  "stat",
+  "grep",
+  "validate",
+  "check",
+  "js",
+  "run",
+  "touch",
+  "write",
+  "mv",
+  "rm",
+]);
+
+function notPermittedMessage(program: string): string {
+  return `COMMAND_NOT_PERMITTED_IN_SANDBOX: '${program}' is not executed as a host OS binary. QORVYNA Workspace Terminal runs allowlisted project & isolated-VM commands only (run 'help' to inspect available commands).`;
+}
+
+/**
+ * Quote-aware split on the governed compound separators `&&` and `;`.
+ * Other shell metacharacters are left in place so `tokenizeWorkspaceCommand`
+ * still rejects them for each part. Quotes (single/double) and backslash
+ * escapes are respected so `write a.txt "a && b"` is one part.
+ */
+function splitGovernedCommand(line: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === ";" || (ch === "&" && line[i + 1] === "&")) {
+      parts.push(current);
+      current = "";
+      if (ch === "&") i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts.map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+/**
+ * Resolve a project path, refusing escapes with an actionable error that names
+ * the exact offending segment. Never silently accepts `..`, absolute paths or
+ * `.git` traversal.
+ */
+function projectPathOrError(
+  input: string,
+): { ok: true; path: string } | { ok: false; error: string } {
+  const path = safeAgentPath(input);
+  if (path) return { ok: true, path };
+  return { ok: false, error: pathEscapeError(input) };
 }
 
 /** Safe quote-aware tokenizer that blocks unquoted shell injection operators. */
@@ -186,7 +279,31 @@ function runIsolatedJs(code: string, files: ProjectFile[]): { exitCode: number; 
   }
 }
 
+/**
+ * Execute a (possibly compound) governed workspace command.
+ *
+ * Compound input (`&&` / `;`) is split into parts. When every part is
+ * independently allowlisted and safe they run sequentially and render one
+ * combined, labeled output block. If any part is not permitted, ONLY that part
+ * is refused, it is named in the output, and nothing after it executes.
+ */
 export async function executeWorkspaceCommand(
+  rawLine: string,
+  adapter: TerminalProjectAdapter,
+  options: { confirmDestructive?: boolean } = {},
+): Promise<TerminalCommandResult> {
+  const parts = splitGovernedCommand(rawLine.trim());
+  if (parts.length > 1) {
+    return executeCompoundCommand(rawLine, parts, adapter, options);
+  }
+  return executeSingleCommand(rawLine, adapter, options);
+}
+
+/**
+ * Execute one allowlisted workspace command. Also used as a single part of a
+ * governed compound command.
+ */
+async function executeSingleCommand(
   rawLine: string,
   adapter: TerminalProjectAdapter,
   options: { confirmDestructive?: boolean } = {},
@@ -236,8 +353,28 @@ export async function executeWorkspaceCommand(
   });
 
   try {
-    const state = await adapter.getState();
+    // Project init: resolve the project's actual root from the workspace.
+    // `/docs` and `/web` are optional conventions — never a hard requirement.
+    let state: TerminalProjectState;
+    try {
+      state = await adapter.getState();
+    } catch (err) {
+      const offending = offendingSegmentFromError(
+        err instanceof Error ? err.message : String(err),
+      );
+      return finish(1, "", projectInitError(offending));
+    }
+    const projectRoot = resolveTerminalProjectRoot(state);
     const byPath = new Map(state.files.map((f) => [f.path, f]));
+
+    /** Resolve a project path or return an actionable, segment-naming error. */
+    const resolveProjectPath = (
+      input: string,
+    ): { ok: true; path: string } | { ok: false; result: TerminalCommandResult } => {
+      const resolved = projectPathOrError(input);
+      if (resolved.ok) return { ok: true, path: resolved.path };
+      return { ok: false, result: finish(1, "", resolved.error) };
+    };
 
     switch (program) {
       case "help":
@@ -247,6 +384,16 @@ export async function executeWorkspaceCommand(
             "QORVYNA Governed Workspace Shell (qsh) — real project & VM operations:",
             "  help                     Show allowlisted workspace commands",
             "  pwd | env | whoami       Inspect isolated workspace metadata",
+            "",
+            "Project init & root:",
+            `  root = the project's actual workspace root (${"/workspace/projects/<id>"}).`,
+            "  /docs and /web are optional conventions — never required by init.",
+            "  A project with index.html at its root initializes and runs cleanly.",
+            "",
+            "Compound input: 'a && b' and 'a ; b' run each allowlisted part",
+            "  sequentially with one labeled output block; a non-permitted part",
+            "  is refused on its own and stops the chain (run 'help' for commands).",
+            "",
             "  ls [prefix]              List project files with byte sizes & SHA-256",
             "  cat <path>               Print utf8 project file contents",
             "  head [-n N] <path>       Print first N lines of a project file (default 20)",
@@ -263,7 +410,7 @@ export async function executeWorkspaceCommand(
         );
 
       case "pwd":
-        return finish(0, `/workspace/projects/${state.projectId}`);
+        return finish(0, projectRoot);
 
       case "whoami":
         return finish(0, `user:${state.uid.slice(0, 12)} (isolated-tenant)`);
@@ -275,6 +422,8 @@ export async function executeWorkspaceCommand(
             `QORVYNA_PROJECT_ID=${state.projectId}`,
             `QORVYNA_PROJECT_TITLE=${state.title}`,
             `QORVYNA_PROJECT_REVISION=${state.revision}`,
+            `QORVYNA_PROJECT_ROOT=${projectRoot}`,
+            `QORVYNA_PROJECT_FS_ROOT=${storedProjectRoot(state)}`,
             `QORVYNA_SANDBOX_RUNTIME=qsh-vm-isolated`,
             `QORVYNA_HOST_ENV_EXPOSED=false`,
           ].join("\n"),
@@ -298,7 +447,9 @@ export async function executeWorkspaceCommand(
       case "cat": {
         const target = args[0];
         if (!target) return finish(1, "", "Usage: cat <path>");
-        const safe = assertSafeProjectPath(target);
+        const resolved = resolveProjectPath(target);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         const file = byPath.get(safe);
         if (!file) return finish(1, "", `cat: ${safe}: No such project file`);
         if (file.encoding === "base64") return finish(1, "", `cat: ${safe}: Binary/base64 file omitted`);
@@ -313,7 +464,9 @@ export async function executeWorkspaceCommand(
           pathArg = args[2];
         }
         if (!pathArg) return finish(1, "", "Usage: head [-n lines] <path>");
-        const safe = assertSafeProjectPath(pathArg);
+        const resolved = resolveProjectPath(pathArg);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         const file = byPath.get(safe);
         if (!file) return finish(1, "", `head: ${safe}: No such project file`);
         if (file.encoding === "base64") return finish(1, "", `head: ${safe}: Binary/base64 file omitted`);
@@ -323,7 +476,9 @@ export async function executeWorkspaceCommand(
       case "stat": {
         const target = args[0];
         if (!target) return finish(1, "", "Usage: stat <path>");
-        const safe = assertSafeProjectPath(target);
+        const resolved = resolveProjectPath(target);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         const file = byPath.get(safe);
         if (!file) return finish(1, "", `stat: ${safe}: No such project file`);
         const bytes = file.encoding === "base64" ? Math.floor(file.content.length * 0.75) : Buffer.byteLength(file.content, "utf8");
@@ -390,7 +545,9 @@ export async function executeWorkspaceCommand(
       case "run": {
         const target = args[0];
         if (!target) return finish(1, "", "Usage: run <path.js>");
-        const safe = assertSafeProjectPath(target);
+        const resolved = resolveProjectPath(target);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         if (!/\.(c|m)?js$/i.test(safe)) {
           return finish(126, "", `run: ${safe}: Only .js/.mjs/.cjs files can run inside the isolated JS VM.`);
         }
@@ -405,7 +562,9 @@ export async function executeWorkspaceCommand(
       case "touch": {
         const target = args[0];
         if (!target) return finish(1, "", "Usage: touch <path>");
-        const safe = assertSafeProjectPath(target);
+        const resolved = resolveProjectPath(target);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         if (byPath.has(safe)) return finish(0, `unchanged ${safe}`);
         const res = await adapter.upsertFile(safe, "", state.revision);
         return finish(0, `created ${safe} (revision ${res.revision})`, "", true);
@@ -415,7 +574,9 @@ export async function executeWorkspaceCommand(
         const target = args[0];
         const content = args.slice(1).join(" ");
         if (!target) return finish(1, "", "Usage: write <path> <content>");
-        const safe = assertSafeProjectPath(target);
+        const resolved = resolveProjectPath(target);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         const res = await adapter.upsertFile(safe, content, state.revision);
         return finish(0, `wrote ${Buffer.byteLength(content, "utf8")} bytes to ${safe} (revision ${res.revision})`, "", true);
       }
@@ -423,16 +584,20 @@ export async function executeWorkspaceCommand(
       case "mv": {
         const [from, to] = args;
         if (!from || !to) return finish(1, "", "Usage: mv <from> <to>");
-        const safeFrom = assertSafeProjectPath(from);
-        const safeTo = assertSafeProjectPath(to);
-        await adapter.renameFile(safeFrom, safeTo, state.revision);
-        return finish(0, `renamed ${safeFrom} -> ${safeTo}`, "", true);
+        const fromResolved = resolveProjectPath(from);
+        if (!fromResolved.ok) return fromResolved.result;
+        const toResolved = resolveProjectPath(to);
+        if (!toResolved.ok) return toResolved.result;
+        await adapter.renameFile(fromResolved.path, toResolved.path, state.revision);
+        return finish(0, `renamed ${fromResolved.path} -> ${toResolved.path}`, "", true);
       }
 
       case "rm": {
         const target = args[0];
         if (!target) return finish(1, "", "Usage: rm <path>");
-        const safe = assertSafeProjectPath(target);
+        const resolved = resolveProjectPath(target);
+        if (!resolved.ok) return resolved.result;
+        const safe = resolved.path;
         if (!byPath.has(safe)) return finish(1, "", `rm: ${safe}: No such project file`);
         if (!options.confirmDestructive) {
           return finish(
@@ -452,15 +617,86 @@ export async function executeWorkspaceCommand(
       }
 
       default:
-        return finish(
-          126,
-          "",
-          `COMMAND_NOT_PERMITTED_IN_SANDBOX: '${program}' is not executed as a host OS binary. QORVYNA Workspace Terminal runs allowlisted project & isolated-VM commands only (run 'help' to inspect available commands).`,
-        );
+        return finish(126, "", notPermittedMessage(program));
     }
   } catch (err) {
     return finish(1, "", err instanceof Error ? err.message : String(err));
   }
+}
+
+/**
+ * Governed compound execution: run each allowlisted part sequentially and
+ * render one combined, labeled output block.
+ *
+ * Rules:
+ *   • A part that tokenizes safely AND uses an allowlisted program runs.
+ *   • A part that is not permitted (unknown program, unsupported metachar,
+ *     non-allowlisted host binary) is refused ON ITS OWN and the chain stops —
+ *     nothing after it executes.
+ *   • A part that needs HITL confirmation stops the chain so the confirmation
+ *     is surfaced before any later mutation.
+ */
+async function executeCompoundCommand(
+  rawLine: string,
+  parts: string[],
+  adapter: TerminalProjectAdapter,
+  options: { confirmDestructive?: boolean },
+): Promise<TerminalCommandResult> {
+  const started = Date.now();
+  const outBlocks: string[] = [];
+  const errBlocks: string[] = [];
+  let exitCode = 0;
+  let mutatedProject = false;
+  let requiresConfirmation: TerminalCommandResult["requiresConfirmation"];
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const label = `[${i + 1}/${parts.length}] $ ${part}`;
+
+    const parsed = tokenizeWorkspaceCommand(part);
+    if (!parsed.ok) {
+      errBlocks.push(`${label}\n${parsed.error}`);
+      exitCode = 2;
+      break;
+    }
+
+    const [program = ""] = parsed.tokens;
+    if (!program) continue;
+
+    if (!ALLOWED_PROGRAMS.has(program)) {
+      errBlocks.push(`${label}\n${notPermittedMessage(program)}`);
+      exitCode = 126;
+      break;
+    }
+
+    const result = await executeSingleCommand(part, adapter, options);
+    outBlocks.push(result.stdout ? `${label}\n${result.stdout}` : label);
+    if (result.stderr) errBlocks.push(`${label}\n${result.stderr}`);
+    exitCode = result.exitCode;
+    mutatedProject = mutatedProject || result.mutatedProject;
+
+    // A governance rejection (non-permitted program, path escape, project-init
+    // failure) stops the chain: nothing after the offending part runs.
+    const governanceStop =
+      result.requiresConfirmation ||
+      result.exitCode === 126 ||
+      /PATH_ESCAPE_BLOCKED|PROJECT_INIT_ERROR/.test(result.stderr);
+    if (governanceStop) {
+      if (result.requiresConfirmation) requiresConfirmation = result.requiresConfirmation;
+      break;
+    }
+  }
+
+  return {
+    command: rawLine,
+    program: "compound",
+    exitCode,
+    stdout: capOutput(outBlocks.join("\n\n")),
+    stderr: capOutput(errBlocks.join("\n\n")),
+    durationMs: Math.max(1, Date.now() - started),
+    mutatedProject,
+    requiresConfirmation,
+  };
 }
 
 export interface FileDiffSummary {
