@@ -51,7 +51,7 @@ export async function POST(request: Request) {
   if (spec.provider === "cloudflare") {
     const creds = cloudflareCredentials();
     if (!creds) {
-      recordModelProbeResult(spec.key, {
+      await recordModelProbeResult(spec.key, {
         ok: false,
         state: "configuration_missing",
         code: "CLOUDFLARE_NOT_CONFIGURED",
@@ -80,7 +80,7 @@ export async function POST(request: Request) {
     }
 
     const result = await testCloudflareModel(creds, spec.id);
-    recordModelProbeResult(spec.key, {
+    await recordModelProbeResult(spec.key, {
       ok: result.ok,
       state: result.state,
       code: result.code,
@@ -110,7 +110,7 @@ export async function POST(request: Request) {
 
   const route = routeForModel(spec);
   if (!route) {
-    recordModelProbeResult(spec.key, {
+    await recordModelProbeResult(spec.key, {
       ok: false,
       state: "configuration_missing",
       code: "PROVIDER_NOT_CONFIGURED",
@@ -151,7 +151,7 @@ export async function POST(request: Request) {
     const ok = Boolean(response.content?.trim());
     const state: ModelProbeState = ok ? "available" : "temporarily_unavailable";
     const message = ok ? `${spec.label} responded cleanly.` : `${spec.label} returned an empty response.`;
-    recordModelProbeResult(spec.key, {
+    await recordModelProbeResult(spec.key, {
       ok,
       state,
       code: ok ? "OK" : "EMPTY_RESPONSE",
@@ -191,7 +191,7 @@ export async function POST(request: Request) {
     } else if (error instanceof Error) {
       message = sanitizeProviderDetail(error.message);
     }
-    recordModelProbeResult(spec.key, { ok: false, state, code, message, status, at: testedAt });
+    await recordModelProbeResult(spec.key, { ok: false, state, code, message, status, at: testedAt });
     const models = await listModelStatus({ refresh: true });
     const updated = models.find((m) => m.key === spec.key) ?? null;
     return NextResponse.json(

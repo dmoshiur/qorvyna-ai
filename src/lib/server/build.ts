@@ -122,7 +122,7 @@ const FALLBACK_BACKOFF_BASE_MS = (() => {
 /** Non-blocking hint shown when the pool has no second model to fall back to. */
 const NO_FALLBACK_HINT = "No fallback model enabled — add at least one more model for resilience.";
 /** Suggested copy when every enabled model failed a stage. */
-const ADD_FALLBACK_HINT = "Enable more models in AI model -> Models to add fallback capacity.";
+const ADD_FALLBACK_HINT = "Enable more models in AI model → Models to add fallback capacity.";
 
 /** Append the design-quality verdict to the provider's build report. */
 function withDesignQuality(report: BuildReport, files: ProjectFile[], spec: SiteDesignSpec | null): BuildReport {
@@ -309,7 +309,10 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
     }
     await saveProgress(unresolved);
     if (!progressSaved) return await abort("BUILD_RUN_FAILED", `${message} The progress record could not be saved, so the run cannot continue automatically. Saved files are still in the project.`, stage);
-    run = pauseRun(run, { available, reason, phase, retryAt, message }, now());
+    // Even a single-model pool must back off between execution sessions.
+    const delay = fallbackBackoffMs(run.segment ?? 1, FALLBACK_BACKOFF_BASE_MS);
+    const nextRetry = reason === "provider_unavailable" ? Math.max(retryAt ?? 0, now() + delay) : retryAt;
+    run = pauseRun(run, { available, reason, phase, retryAt: nextRetry, message }, now());
     note(stage ?? null, "warn", message);
     await emit(stage);
     return done(run);
@@ -318,7 +321,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
   const providerOutage = (error: unknown): { outage: boolean; retryAt: number | null } => {
     const text = error instanceof Error ? error.message : "";
     const typed = error instanceof AIProviderError ? error : null;
-    const outage = typed ? typed.retryable : /rate[-_ ]?limit|provider_unavailable|timeout|network|empty_response|cool(?:ing)?[- ]?down|no model available|deadline/i.test(text);
+    const outage = typed ? typed.retryable : /rate[-_ ]?limit|quota|billing|provider_unavailable|timeout|network|empty_response|cool(?:ing)?[- ]?down|no model available|deadline/i.test(text);
     const model = run.model?.model ?? "";
     return { outage, retryAt: typed?.retryAt ?? (outage && model ? nextAvailability(model) : null) };
   };
@@ -443,6 +446,7 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
       // the user explicitly selects another available model.
       const resolved = await resolvePool(d, user.uid, null, {
         intent: "artifact",
+        strictSelection: true,
         reason: "Build runs generate project files, so they use the artifact class.",
       });
       teamDegraded = resolved.degraded;
@@ -545,7 +549,10 @@ export async function runBuildPipeline(input: BuildPipelineInput): Promise<Build
         onAttempt: (attempt, index) => reportStageAttempt(stage, stepId, attempt, index),
       });
       for (const attempt of attempts) {
-        if (attempt.outcome !== "ok") note(stage === "repair" || stage === "review" ? "validate" : "generate", "warn", `${attempt.label} could not take the ${stage} stage (${attempt.detail}); continuing with the next model.`);
+        if (attempt.outcome !== "ok") {
+          const hasNext = attempts.indexOf(attempt) < attempts.length - 1;
+          note(stage === "repair" || stage === "review" ? "validate" : "generate", "warn", `${attempt.label} could not take the ${stage} stage (${attempt.detail}); ${hasNext ? "continuing with the next model" : "no further model was available"}.`);
+        }
       }
       reportStageDone(stage, stepId, completed, attempts, startedAt);
       if (!completed) throw stageFallbackError(stage, attempts);

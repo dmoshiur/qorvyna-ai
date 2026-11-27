@@ -93,7 +93,7 @@ export function toFirestoreRun(run: BuildRun): Json {
       : null,
     error: run.error ? { code: run.error.code, message: run.error.message.slice(0, 600) } : null,
     continuation: run.continuation
-      ? { available: run.continuation.available === true, reason: run.continuation.reason, phase: run.continuation.phase, retryAt: run.continuation.retryAt ?? null, message: run.continuation.message.slice(0, 300) }
+      ? { available: run.continuation.available === true, reason: run.continuation.reason, phase: run.continuation.phase, retryAt: run.continuation.retryAt ?? null, message: run.continuation.message.slice(0, 1200) }
       : null,
     segment: run.segment ?? 1,
     knownIssues: run.knownIssues ?? 0,

@@ -8,7 +8,7 @@
 // Temporary discovery errors are NEVER cached as permanent unavailability.
 
 import "server-only";
-import { nowTs, type Db } from "@/lib/firebase/admin";
+import { adminDb, nowTs, type Db } from "@/lib/firebase/admin";
 import { fetchModelCatalog } from "@/lib/ai/model-catalog";
 import { QORVYNA_MODEL_BASE_URL } from "@/lib/ai/model";
 import { ensureAccounts } from "@/lib/ai/accounts";
@@ -61,7 +61,7 @@ type RuntimeModelHealth = {
 
 const runtimeHealth = new Map<string, RuntimeModelHealth>();
 
-export function recordModelProbeResult(
+export async function recordModelProbeResult(
   modelKey: string,
   result: {
     ok: boolean;
@@ -71,7 +71,7 @@ export function recordModelProbeResult(
     status: number | null;
     at?: string;
   },
-): void {
+): Promise<void> {
   const at = result.at ?? new Date().toISOString();
   const prev = runtimeHealth.get(modelKey);
   runtimeHealth.set(modelKey, {
@@ -82,6 +82,22 @@ export function recordModelProbeResult(
       ? null
       : { code: result.code, message: result.message, status: result.status, at },
   });
+  // Verification must survive serverless instance changes and restarts. Failed
+  // probes do not erase the most recent successful verification. Use a
+  // transaction so a slow older request cannot overwrite a newer timestamp.
+  if (result.ok) {
+    try {
+      const db = adminDb();
+      const ref = db.collection("model_verifications").doc(modelKey);
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const previous = snap.data()?.last_verified_at;
+        if (typeof previous !== "string" || previous < at) tx.set(ref, { last_verified_at: at }, { merge: true });
+      });
+    } catch (error) {
+      console.warn("[QORVYNA] Could not persist model verification", { modelKey, error: error instanceof Error ? error.name : "unknown" });
+    }
+  }
 }
 
 export function resetModelHealthForTests(): void {
@@ -99,16 +115,16 @@ export async function probeModelForRefresh(spec: ModelSpec): Promise<{ ok: boole
   if (spec.provider === "cloudflare") {
     const creds = cloudflareCredentials();
     if (!creds) {
-      recordModelProbeResult(spec.key, { ok: false, state: "configuration_missing", code: "CLOUDFLARE_NOT_CONFIGURED", message: "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not configured on the server.", status: null, at: testedAt });
+      await recordModelProbeResult(spec.key, { ok: false, state: "configuration_missing", code: "CLOUDFLARE_NOT_CONFIGURED", message: "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not configured on the server.", status: null, at: testedAt });
       return { ok: false, state: "configuration_missing", code: "CLOUDFLARE_NOT_CONFIGURED", message: "Cloudflare is not configured on the server.", status: null };
     }
     const result = await testCloudflareModel(creds, spec.id);
-    recordModelProbeResult(spec.key, { ok: result.ok, state: result.state, code: result.code, message: result.message, status: result.status, at: testedAt });
+    await recordModelProbeResult(spec.key, { ok: result.ok, state: result.state, code: result.code, message: result.message, status: result.status, at: testedAt });
     return { ok: result.ok, state: result.state, code: result.code, message: result.message, status: result.status };
   }
   const route = routeForModel(spec);
   if (!route) {
-    recordModelProbeResult(spec.key, { ok: false, state: "configuration_missing", code: "PROVIDER_NOT_CONFIGURED", message: "No server credential is installed for this model.", status: null, at: testedAt });
+    await recordModelProbeResult(spec.key, { ok: false, state: "configuration_missing", code: "PROVIDER_NOT_CONFIGURED", message: "No server credential is installed for this model.", status: null, at: testedAt });
     return { ok: false, state: "configuration_missing", code: "PROVIDER_NOT_CONFIGURED", message: "No server credential is configured for this model.", status: null };
   }
   const started = Date.now();
@@ -123,7 +139,7 @@ export async function probeModelForRefresh(spec: ModelSpec): Promise<{ ok: boole
     const ok = Boolean(response.content?.trim());
     const state: ModelProbeState = ok ? "available" : "temporarily_unavailable";
     const message = ok ? `${spec.label} responded cleanly.` : `${spec.label} returned an empty response.`;
-    recordModelProbeResult(spec.key, { ok, state, code: ok ? "OK" : "EMPTY_RESPONSE", message, status: 200, at: testedAt });
+    await recordModelProbeResult(spec.key, { ok, state, code: ok ? "OK" : "EMPTY_RESPONSE", message, status: 200, at: testedAt });
     return { ok, state, code: ok ? "OK" : "EMPTY_RESPONSE", message, status: 200 };
   } catch (error) {
     const state: ModelProbeState = error instanceof AIProviderError
@@ -136,7 +152,7 @@ export async function probeModelForRefresh(spec: ModelSpec): Promise<{ ok: boole
     const code = error instanceof AIProviderError ? (error.code ?? error.type.toUpperCase()) : "PROVIDER_PROBE_FAILED";
     const message = error instanceof AIProviderError ? sanitizeProviderDetail(error.detail) : sanitizeProviderDetail(error instanceof Error ? error.message : "Connectivity check failed.");
     const status = error instanceof AIProviderError ? error.status ?? null : null;
-    recordModelProbeResult(spec.key, { ok: false, state, code, message, status, at: testedAt });
+    await recordModelProbeResult(spec.key, { ok: false, state, code, message, status, at: testedAt });
     return { ok: false, state, code, message, status };
   }
 }
@@ -435,11 +451,23 @@ const REASON: Record<ModelAvailability, string> = {
 
 /** Every registered model with its real, current status. No credentials. */
 export async function listModelStatus(opts: { refresh?: boolean } = {}): Promise<ModelStatus[]> {
-  const [catalog, cfCatalog] = await Promise.all([hostedCatalog(opts.refresh), cloudflareCatalog(opts.refresh)]);
+  const [catalog, cfCatalog, persisted] = await Promise.all([
+    hostedCatalog(opts.refresh), cloudflareCatalog(opts.refresh),
+    (async () => {
+      try {
+        const db = adminDb();
+        return await Promise.all(MODEL_REGISTRY.map(async (spec) => {
+          const snap = await db.collection("model_verifications").doc(spec.key).get();
+          const value = snap.data()?.last_verified_at;
+          return typeof value === "string" ? value : null;
+        }));
+      } catch { return MODEL_REGISTRY.map(() => null); }
+    })(),
+  ]);
   // "Dedicated" describes the HOSTED route for the default model, so it must
   // not be inferred from the primary route (which may be Cloudflare).
   const dedicated = routeForModel(defaultModel())?.providerId === "gpt-oss";
-  return MODEL_REGISTRY.map((spec) => {
+  return MODEL_REGISTRY.map((spec, index) => {
     const evalResult = availabilityOf(spec, catalog, cfCatalog);
     const cooling = cooldownRemainingMs(spec.key);
     const rateLimited = evalResult.availability === "available" && cooling > 0;
@@ -464,7 +492,7 @@ export async function listModelStatus(opts: { refresh?: boolean } = {}): Promise
       status_code: statusCode,
       status_label: PROBE_STATE_LABEL[statusCode],
       supported_modes: [...spec.supportedModes],
-      last_tested_at: evalResult.lastTestedAt,
+      last_tested_at: [evalResult.lastTestedAt, persisted[index]].filter((value): value is string => Boolean(value)).sort().at(-1) ?? null,
       last_error: evalResult.lastError,
       diagnostic_hint: evalResult.diagnosticHint,
     };
@@ -519,6 +547,8 @@ export type ResolvePoolOptions = {
   intent?: RouteIntent;
   /** Human explanation for the classification, forwarded to the UI steps. */
   reason?: string;
+  /** Builds must never substitute a model the user did not enable. */
+  strictSelection?: boolean;
 };
 
 /**
@@ -579,7 +609,7 @@ export async function resolvePool(
     // unavailable models in a manual pool, fall back to the default route and
     // report `skipped` transparently.
     const explicitGlmOnly = preference.enabled.length === 1 && preference.enabled[0] === CLOUDFLARE_MODEL_KEY;
-    if (!targets.length && !explicitGlmOnly) {
+    if (!targets.length && !explicitGlmOnly && !options.strictSelection) {
       const fallback = qorvynaModelRoute();
       if (fallback) {
         targets.push(fallback);

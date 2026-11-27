@@ -39,6 +39,8 @@ export type MessageMetadata = {
   audio_waveform?: number[];
   audio_language?: string | null;
   action?: string;
+  sandbox_output?: { command: string; stdout: string; stderr: string; exitCode: number | null; durationMs: number; timedOut: boolean };
+  sandbox_agent_command?: string;
   project_id?: string;
   image_data_url?: string;
   /** Wall-clock time for the reply. Never rendered as "thinking". */

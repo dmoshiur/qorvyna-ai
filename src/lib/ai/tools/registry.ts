@@ -108,6 +108,7 @@ export interface ToolContext {
   uid: string;
   email: string | null;
   requestId: string;
+  executionId?: string;
   approvalId?: string;
   dryRun?: boolean;
 }

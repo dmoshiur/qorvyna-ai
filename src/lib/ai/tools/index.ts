@@ -13,6 +13,7 @@ import { listProjects, getProject } from "@/lib/server/projects";
 import { githubMcpFileSchema, readGithubMcpFile, type GithubMcpFileInput } from "@/lib/server/mcp/github";
 import { listGithubRepos, getGithubConnection, createGithubRepo } from "@/lib/server/github";
 import { runDaytonaCode } from "@/lib/server/daytona";
+import { runConversationSandbox } from "@/lib/server/conversation-sandbox";
 import { latestBuildRunForProject } from "@/lib/server/build";
 import { listDevices } from "@/lib/server/pairing";
 import { listHubDevices } from "@/lib/server/device-hub";
@@ -161,6 +162,30 @@ toolRegistry.register({
       const code = err instanceof Error ? err.message : "GITHUB_ERROR";
       return { ok: false, error: /^[A-Z0-9_]+$/.test(code) ? code : "GITHUB_ERROR" };
     }
+  },
+});
+
+// Narrow read-only command execution is available only from the explicit
+// sandbox flow, not the general model-callable tool list. The gateway still
+// applies device scopes, rate limits, validation and audit on every call.
+toolRegistry.register({
+  id: "run_command",
+  description: "Run an explicitly requested, allowlisted command in a network-isolated sandbox.",
+  category: "projects",
+  risk: RiskTier.LOW,
+  requiredPermissions: [],
+  scopes: ["projects:write"],
+  environment: "isolated-worker",
+  timeoutSeconds: 100,
+  approvalRequired: false,
+  auditRequired: true,
+  rateLimitPerMinute: 10,
+  modelCallable: false,
+  inputSchema: z.object({ conversationId: z.string().min(1).max(128), mode: z.enum(["chat", "agent"]), command: z.string().min(1).max(4000), cwd: z.string().max(500).optional(), timeoutMs: z.number().finite().optional() }).strict(),
+  handler: async (ctx, input: { conversationId: string; mode: "chat" | "agent"; command: string; cwd?: string; timeoutMs?: number }): Promise<ToolResult> => {
+    if (ctx.dryRun) return { ok: true, data: { dry_run: true } };
+    const result = await runConversationSandbox({ d: asDb(ctx), uid: ctx.uid, ...input, executionId: ctx.executionId ?? ctx.requestId });
+    return { ok: result.ok, data: { result }, ...(!result.ok ? { error: result.error } : {}) };
   },
 });
 

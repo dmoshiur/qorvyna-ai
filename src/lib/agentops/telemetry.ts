@@ -102,6 +102,13 @@ export function recordToSpans(record: ExecutionRecord): Span[] {
         "agentops.tokens.in": step.usage.promptTokens,
         "agentops.tokens.out": step.usage.completionTokens,
         "agentops.attempts": step.attempts.length,
+        ...(step.provider === "sandbox" ? {
+          "agentops.sandbox.id": step.model,
+          "agentops.sandbox.duration_ms": step.durationMs,
+          "agentops.sandbox.exit_code": /; exit ([^;]+);/.exec(step.detail ?? "")?.[1] ?? "",
+          "agentops.sandbox.command": /; command ([\s\S]*)$/.exec(step.detail ?? "")?.[1] ?? "",
+          "agentops.sandbox.lifecycle": step.label === "Sandbox create" ? "create" : "execute",
+        } : {}),
       },
     });
   }
