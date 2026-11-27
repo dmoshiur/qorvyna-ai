@@ -111,6 +111,8 @@ export interface ToolContext {
   executionId?: string;
   approvalId?: string;
   dryRun?: boolean;
+  /** Conversation this tool call belongs to (Agent mode), when known. */
+  conversationId?: string;
 }
 
 /** Uniform result envelope — no fabricated success shape. */

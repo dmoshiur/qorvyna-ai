@@ -10,8 +10,10 @@ import type { Db } from "@/lib/firebase/admin";
 import type { SessionUser } from "@/lib/firebase/session";
 import { RiskTier, toolRegistry, type ToolContext, type ToolResult } from "@/lib/ai/tools/registry";
 import { listProjects, getProject } from "@/lib/server/projects";
+import { RpcError } from "@/lib/server/errors";
 import { githubMcpFileSchema, readGithubMcpFile, type GithubMcpFileInput } from "@/lib/server/mcp/github";
 import { listGithubRepos, getGithubConnection, createGithubRepo } from "@/lib/server/github";
+import { importRepoToProject } from "@/lib/server/repo-import";
 import { runDaytonaCode } from "@/lib/server/daytona";
 import { runConversationSandbox } from "@/lib/server/conversation-sandbox";
 import { latestBuildRunForProject } from "@/lib/server/build";
@@ -161,6 +163,62 @@ toolRegistry.register({
     } catch (err) {
       const code = err instanceof Error ? err.message : "GITHUB_ERROR";
       return { ok: false, error: /^[A-Z0-9_]+$/.test(code) ? code : "GITHUB_ERROR" };
+    }
+  },
+});
+
+// Import a GitHub repository into a project workspace (Issue 6). The model MUST
+// call this whenever the user names a github.com repository URL and asks to
+// import, clone, copy or pull it — never reply that cloning is impossible. It
+// clones server-side (public repos need no connection; private repos use the
+// user's stored token), enforces size/file limits, and reports the outcome.
+toolRegistry.register({
+  id: "import_repo",
+  description:
+    "Import a GitHub repository into a QORVYNA project workspace. Use this whenever the user gives a github.com repository URL and asks to import, clone, copy or pull it — do not reply that you cannot clone. Public repos import without a GitHub connection; private repos use the user's connected account. Returns the project id and the number of files imported.",
+  category: "git",
+  risk: RiskTier.LOW,
+  requiredPermissions: [],
+  scopes: ["projects:write"],
+  environment: "server",
+  timeoutSeconds: 120,
+  approvalRequired: false,
+  auditRequired: true,
+  rateLimitPerMinute: 5,
+  modelCallable: true,
+  inputSchema: z.object({
+    repo_url: z.string().min(1).max(2000),
+    target_project: z.string().min(1).max(128).optional(),
+    title: z.string().min(1).max(80).optional(),
+  }),
+  handler: async (ctx, input: { repo_url: string; target_project?: string; title?: string }): Promise<ToolResult> => {
+    if (ctx.dryRun) {
+      return { ok: true, data: { dry_run: true, repo_url: input.repo_url }, message: "Dry run: no repository was imported." };
+    }
+    try {
+      const result = await importRepoToProject(asDb(ctx), asUser(ctx), {
+        repoUrl: input.repo_url,
+        targetProjectId: input.target_project ?? null,
+        title: input.title,
+        conversationId: ctx.conversationId ?? null,
+      });
+      return {
+        ok: true,
+        data: {
+          project_id: result.projectId,
+          title: result.title,
+          files: result.fileCount,
+          bytes: result.bytes,
+          elapsed_ms: result.elapsedMs,
+          repo: result.repo,
+          private: result.private,
+        },
+        message: `Imported ${result.fileCount} file${result.fileCount === 1 ? "" : "s"} from ${result.repo.owner}/${result.repo.name} into project ${result.title}.`,
+      };
+    } catch (err) {
+      if (err instanceof RpcError) return { ok: false, error: err.code, message: err.detail ?? err.code };
+      const code = err instanceof Error ? err.message : "REPO_IMPORT_FAILED";
+      return { ok: false, error: /^[A-Z0-9_]+$/.test(code) ? code : "REPO_IMPORT_FAILED" };
     }
   },
 });

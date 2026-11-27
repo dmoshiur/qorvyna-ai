@@ -266,6 +266,25 @@ export function detectBuildIntent(input: string, context: BuildIntentContext = {
   };
 }
 
+/**
+ * Issue 6: a message that asks for work on "my project" without pointing at
+ * anything (no attachments, no selected project, no repo URL) is asking for
+ * project context. The chat should offer the project picker in the very first
+ * reply rather than answering as if it knew which project was meant.
+ */
+export function wantsProjectContext(text: string): boolean {
+  const clean = String(text ?? "").trim();
+  if (!clean) return false;
+  // A concrete create/build request is not context-seeking: it goes to its own
+  // flow (create-mode build, or the picker only for a named existing target).
+  if (/\b(?:create|build|make|generate|scaffold|init(?:ialize)?|new\s+project|new\s+app)\b/i.test(clean)) return false;
+  // A repo URL is handled by the import flow, not the picker.
+  if (/https?:\/\/(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)\b/i.test(clean)) return false;
+  const referencesProject = /\b(?:my|our|the|your|existing|attached|current|this)?\s*(?:project|app(?:lication)?|application|codebase|code\s+base|site|website|repo(?:sitory)?|product)\b/i.test(clean);
+  const asksForWork = /\b(?:help me|help|fix|change|update|improve|review|debug|check|refactor|add|remove|tweak|adjust|work on|edit|support|resolve|investigate|get it working|make it work|look at|touch|modify|patch|enhance|optimize|improve on)\b/i.test(clean);
+  return referencesProject && asksForWork;
+}
+
 /** Should the chat run the real build pipeline for this message? */
 export function shouldRunBuildPipeline(intent: BuildIntent): boolean {
   return !intent.needsClarification && (intent.build || intent.publish || intent.preview || intent.fix);

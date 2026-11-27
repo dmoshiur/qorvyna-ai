@@ -20,6 +20,7 @@ import { Activity, ChevronDown, FileDiff, Terminal } from "lucide-react";
 import type { BuildCheck } from "@/lib/deploy/validate";
 import type { BuildRun, BuildStageId, FileChange, StageState } from "@/lib/deploy/stages";
 import { changeCounts, runLiveness, stageDef, stageProgress } from "@/lib/deploy/stages";
+import { isBlockerCode } from "@/lib/ai/task-outcome";
 import { RelativeDeployTimeText, TimeOfDayText } from "@/components/local-time";
 import { cn } from "@/lib/utils";
 import { Progress, Spinner } from "@/components/ui";
@@ -140,6 +141,10 @@ export function BuildStatusCard({
   const progress = stageProgress(run);
   const live = run.status === "running" || run.status === "requested";
   const showDetails = stagesOpen || run.status === "failed";
+  // A run blocked before any stage ran never started a build. "Build stopped"
+  // is reserved for builds that actually ran and errored.
+  const ranStage = run.stages.some((stage) => stage.state === "completed" || stage.state === "failed");
+  const blockedBeforeBuild = run.status === "failed" && !ranStage && isBlockerCode(run.error?.code ?? null);
 
   return (
     <section
@@ -162,8 +167,8 @@ export function BuildStatusCard({
               ? run.actions.publish
                 ? "Build and publish finished"
                 : "Build finished"
-              : run.status === "failed"
-                ? "Build stopped"
+                : run.status === "failed"
+                ? (blockedBeforeBuild ? "Not started · blocked at plan" : "Build stopped")
                 : run.status === "awaiting_input"
                   ? "Waiting for your answer"
                 : run.status === "cancelled"

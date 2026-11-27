@@ -10,6 +10,7 @@ import {
   detectImageAssetRequest,
   planFromRequest,
   shouldRunBuildPipeline,
+  wantsProjectContext,
 } from "@/lib/ai/build-intent";
 
 const WITH_PROJECT = { projectFileCount: 3, agentMode: true };
@@ -133,5 +134,25 @@ describe("detectImageAssetRequest", () => {
   it("does not spend credits for ordinary chat", () => {
     expect(detectImageAssetRequest("what is a hero section?")).toBe(false);
     expect(detectImageAssetRequest("explain the build errors")).toBe(false);
+  });
+});
+
+describe("wantsProjectContext (Issue 6 picker trigger)", () => {
+  it("flags a context-seeking message about an existing project", () => {
+    expect(wantsProjectContext("help me fix my project")).toBe(true);
+    expect(wantsProjectContext("can you review the app?")).toBe(true);
+    expect(wantsProjectContext("update the codebase with a new form")).toBe(true);
+  });
+
+  it("does not flag a concrete create/build request", () => {
+    expect(wantsProjectContext("create a portfolio website")).toBe(false);
+    expect(wantsProjectContext("build me a dashboard")).toBe(false);
+    expect(wantsProjectContext("generate a new app")).toBe(false);
+  });
+
+  it("does not flag a repo URL (that is the import flow) or plain chat", () => {
+    expect(wantsProjectContext("import https://github.com/acme/widgets")).toBe(false);
+    expect(wantsProjectContext("what is the weather today")).toBe(false);
+    expect(wantsProjectContext("")).toBe(false);
   });
 });

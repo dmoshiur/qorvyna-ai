@@ -1331,7 +1331,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
           try {
             const parsed = JSON.parse(call.function.arguments || "{}");
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Tool arguments must be a JSON object.");
-            toolResult = await executeAgentTool(d, user, name, parsed, { modelInitiated: true, executionId: agentOpsExecId });
+            toolResult = await executeAgentTool(d, user, name, parsed, { modelInitiated: true, executionId: agentOpsExecId, ...(convId ? { conversationId: convId } : {}) });
             toolsExecuted += 1;
           } catch (error) {
             toolResult = { ok: false, error: error instanceof Error ? error.message.slice(0, 160) : "INVALID_TOOL_ARGUMENTS" };

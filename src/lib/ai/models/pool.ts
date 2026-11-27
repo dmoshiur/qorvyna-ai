@@ -343,7 +343,7 @@ function availabilityOf(spec: ModelSpec, catalog: Catalog, cfCatalog: IdCatalog)
         contextTokens: spec.contextTokens,
         statusCode: "unavailable_for_account",
         statusLabel: PROBE_STATE_LABEL.unavailable_for_account,
-        reason: "This Cloudflare account's model catalog did not include this model.",
+        reason: `This ${spec.providerLabel} account's model catalog did not include this model.`,
         lastTestedAt: health?.lastTestedAt ?? null,
         lastError: health?.lastError ?? null,
         diagnosticHint: diagnosticHintFor("unavailable_for_account", spec),

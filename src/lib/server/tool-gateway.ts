@@ -88,7 +88,7 @@ export async function executeAgentTool(
   user: SessionUser,
   toolId: string,
   args: unknown,
-  opts: { approvalId?: string; dryRun?: boolean; modelInitiated?: boolean; executionId?: string } = {},
+  opts: { approvalId?: string; dryRun?: boolean; modelInitiated?: boolean; executionId?: string; conversationId?: string } = {},
 ): Promise<ToolResult & { request_id: string }> {
   const requestId = `tool_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
   const startedAt = Date.now();
@@ -150,6 +150,7 @@ export async function executeAgentTool(
     executionId,
     approvalId: opts.approvalId,
     dryRun: opts.dryRun ?? false,
+    ...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
   };
   const authorizer = async (c: ToolContext, permissions: readonly string[]) => {
     for (const p of permissions) {

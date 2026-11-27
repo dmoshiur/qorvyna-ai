@@ -110,6 +110,22 @@ export function DeploymentRow({
   const failed = run.status === "failed";
   // A blocked run did not break: it reached something that has to change first.
   const title = blocked ? (copy.title === "Publishing failed" ? "Publishing blocked" : "Blocked") : copy.title;
+  // A run that was blocked before any stage ran never started a build. "Failed"
+  // is reserved for builds that actually ran and errored.
+  const ranStage = run.stages.some((stage) => stage.state === "completed" || stage.state === "failed");
+  const buildLabel = blocked && !ranStage
+    ? "Not started · blocked at plan"
+    : run.status === "succeeded"
+      ? "Successful"
+      : run.status === "failed"
+        ? "Failed"
+        : run.status === "cancelled"
+          ? "Cancelled"
+          : run.status === "paused"
+            ? "Waiting"
+            : runLiveness(run, Date.now()).stale
+              ? "Stopped"
+              : "Running";
 
   return (
     <div className="mt-3 max-w-xl overflow-hidden rounded-xl border border-border bg-surface">
@@ -168,18 +184,7 @@ export function DeploymentRow({
         <div className="space-y-3 border-t border-border px-3 py-3">
           <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <Stat label="Files" value={String(run.fileCount || overview?.files || 0)} />
-            <Stat
-              label="Build"
-              value={
-                run.status === "succeeded" ? "Successful"
-                  : run.status === "failed" ? "Failed"
-                    : run.status === "cancelled" ? "Cancelled"
-                      : run.status === "paused" ? "Waiting"
-                        // A run that stopped reporting is not "Running".
-                        : runLiveness(run, Date.now()).stale ? "Stopped"
-                          : "Running"
-              }
-            />
+            <Stat label="Build" value={buildLabel} />
             <Stat label="Deployment" value={overview ? overview.status_label : progress.activeLabel} />
             <Stat label="URLs" value={String(urls.length || (liveUrl ? 1 : 0))} />
             {overview?.deployments?.[0]?.version ? <Stat label="Version" value={`v${overview.deployments[0].version}`} /> : null}
