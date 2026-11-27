@@ -15,6 +15,8 @@ import * as rpc from "@/lib/server/rpc";
 import { getSidebarData } from "@/lib/server/queries";
 import * as imageConfig from "@/lib/ai/image/config";
 import * as providerAccounts from "@/lib/ai/accounts";
+import * as providerModels from "@/lib/ai/provider-models";
+import { probeProvider, providerInfo } from "@/lib/ai/providers";
 import { cloudflareCredentials } from "@/lib/ai/cloudflare";
 import { getCloudflareUsage } from "@/lib/ai/cloudflare-quota";
 import * as appUpdates from "@/lib/server/app-updates";
@@ -812,19 +814,55 @@ const ACTIONS: Record<string, Handler> = {
     );
     return { ...usage, model: credentials?.model ?? null };
   },
-  // --- AI provider accounts (multiple Groq keys, rotation) --------------------
+  // --- AI provider accounts (multiple keys per provider, rotation) ------------
+  // Credentials for several providers can be connected. Groq accounts rotate
+  // through shared organization rate limits; other providers' keys are kept
+  // encrypted and are only used for the admin test/probe and future routing.
   // Keys are encrypted before they are stored and are never returned: these
   // actions expose labels, the last four characters and live health only.
   admin_provider_accounts_list: async (d, u) => {
     if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
     await providerAccounts.ensureAccounts(d, true);
-    return { accounts: providerAccounts.accountStatuses(), stored: await providerAccounts.listStoredAccounts(d), can_store: imageConfig.canEncryptSecrets() };
+    const [stored, models] = await Promise.all([providerAccounts.listStoredAccounts(d), providerModels.listProviderModels(d)]);
+    const byAccount = new Map(models.map((model) => [model.account_id, model]));
+    const grouped: Record<string, typeof models> = {};
+    for (const model of models) {
+      const list = grouped[model.account_id];
+      if (list) list.push(model);
+      else grouped[model.account_id] = [byAccount.get(model.account_id)!];
+    }
+    return { accounts: providerAccounts.accountStatuses(), stored, models: grouped, can_store: imageConfig.canEncryptSecrets() };
   },
   admin_provider_account_add: async (d, u, b) => {
     if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
-    const result = await providerAccounts.addStoredAccount(d, { label: str(b.label, "Groq account"), apiKey: typeof b.api_key === "string" ? b.api_key : "", addedBy: u.uid });
-    await rpc.logAudit(d, u.uid, "provider_account_added", "provider_accounts", result.doc_id, "", { provider: "groq", account: result.id });
+    const provider = providerInfo(str(b.provider, "groq"));
+    if (!provider) throw new RpcError("INVALID_PROVIDER", 400, "That provider type is not supported.");
+    const result = await providerAccounts.addStoredAccount(d, {
+      label: str(b.label, `${provider.label} account`),
+      apiKey: typeof b.api_key === "string" ? b.api_key : "",
+      addedBy: u.uid,
+      provider: provider.type,
+      baseUrl: typeof b.base_url === "string" ? b.base_url : "",
+    });
+    await rpc.logAudit(d, u.uid, "provider_account_added", "provider_accounts", result.doc_id, "", { provider: provider.type, account: result.id });
     return result;
+  },
+  /** Verify a credential against the provider's live model catalog. */
+  admin_provider_account_test: async (d, u, b) => {
+    if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
+    const stored = typeof b.doc_id === "string" ? b.doc_id : "";
+    if (stored) {
+      const account = await providerAccounts.storedAccountCredentials(d, stored);
+      if (!account) throw new RpcError("NOT_FOUND", 404);
+      const result = await probeProvider(account.provider, account.baseUrl, account.key);
+      await rpc.logAudit(d, u.uid, "provider_account_tested", "provider_accounts", stored, "", { provider: account.provider, ok: result.ok });
+      const info = providerInfo(account.provider)!;
+      return { provider: account.provider, provider_label: info.label, ...result };
+    }
+    const provider = providerInfo(str(b.provider, "groq"));
+    if (!provider) throw new RpcError("INVALID_PROVIDER", 400, "That provider type is not supported.");
+    const result = await probeProvider(provider.type, str(b.base_url, provider.defaultBaseUrl), typeof b.api_key === "string" ? b.api_key : "");
+    return { provider: provider.type, provider_label: provider.label, ...result };
   },
   admin_provider_account_update: async (d, u, b) => {
     if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
@@ -838,6 +876,40 @@ const ACTIONS: Record<string, Handler> = {
     const docId = z.string().min(1).max(128).parse(b.doc_id);
     await providerAccounts.removeStoredAccount(d, docId);
     await rpc.logAudit(d, u.uid, "provider_account_removed", "provider_accounts", docId, "", {});
+    return { ok: true };
+  },
+  // --- Models for connected provider accounts -----------------------------------
+  // Model IDs are stored exactly as entered; the provider's live catalog is
+  // only consulted by the test action above.
+  admin_provider_models_list: async (d, u) => {
+    if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
+    return { models: await providerModels.listProviderModels(d) };
+  },
+  admin_provider_model_add: async (d, u, b) => {
+    if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
+    const result = await providerModels.addProviderModel(d, {
+      accountId: typeof b.account_id === "string" ? b.account_id : "",
+      modelId: typeof b.model_id === "string" ? b.model_id : "",
+      label: typeof b.label === "string" ? b.label : "",
+      contextTokens: Number.isFinite(Number(b.context_tokens)) ? Number(b.context_tokens) : null,
+      provider: typeof b.provider === "string" ? b.provider : "",
+      addedBy: u.uid,
+    });
+    await rpc.logAudit(d, u.uid, "provider_model_added", "provider_models", result.model_id, "", { account: typeof b.account_id === "string" ? b.account_id : "" });
+    return result;
+  },
+  admin_provider_model_update: async (d, u, b) => {
+    if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
+    const modelId = z.string().min(1).max(128).parse(b.model_id);
+    await providerModels.updateProviderModel(d, modelId, { label: typeof b.label === "string" ? b.label : undefined, enabled: typeof b.enabled === "boolean" ? b.enabled : undefined });
+    await rpc.logAudit(d, u.uid, "provider_model_updated", "provider_models", modelId, "", { enabled: typeof b.enabled === "boolean" ? b.enabled : null });
+    return { ok: true };
+  },
+  admin_provider_model_remove: async (d, u, b) => {
+    if (!(await rpc.hasPermission(d, u.uid, "system.settings"))) throw new RpcError("PERMISSION_DENIED", 403);
+    const modelId = z.string().min(1).max(128).parse(b.model_id);
+    await providerModels.removeProviderModel(d, modelId);
+    await rpc.logAudit(d, u.uid, "provider_model_removed", "provider_models", modelId, "", {});
     return { ok: true };
   },
   // --- image generation provider (Together AI + future providers) -------------

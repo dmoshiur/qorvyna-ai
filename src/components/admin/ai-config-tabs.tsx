@@ -4,7 +4,8 @@
 //
 //   Overview  · live provider status dashboard
 //   Model     · the single QORVYNA model (GPT OSS 120B) — read-only status
-//   Accounts  · connected Groq accounts, live limits and rotation state
+//   Providers · connected provider accounts (multiple Groq keys + OpenAI,
+//               Claude, Gemini and custom endpoints) and their models
 //   Image     · image generation service (Together AI)
 //   Sandbox   · the ONE shared Daytona Cloud Sandbox configuration
 //   Updates   · phone app release management
@@ -40,7 +41,7 @@ const DaytonaAdminConnection = lazy(() =>
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "text", label: "AI model" },
-  { id: "accounts", label: "Provider accounts" },
+  { id: "accounts", label: "Providers & models" },
   { id: "image", label: "Image generation" },
   { id: "sandbox", label: "Sandbox" },
   { id: "updates", label: "Phone & Updates" },
