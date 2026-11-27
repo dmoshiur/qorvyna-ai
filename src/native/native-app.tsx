@@ -40,6 +40,7 @@ import { NotificationsForm } from "@/components/settings/notifications-form";
 import { AppearancePanel } from "@/components/settings/appearance-panel";
 import { LanguagePanel } from "@/components/settings/language-panel";
 import { GithubConnection } from "@/components/github-connection";
+import { DaytonaConnection } from "@/components/daytona-connection";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { HistorySearch } from "@/components/history-search";
 import { OnboardingClient } from "@/components/onboarding-client";
@@ -709,7 +710,12 @@ function NativeSettings({ tab }: { tab: string }) {
       {tab === "appearance" && <AppearancePanel />}
       {tab === "notifications" && <NotificationsForm settings={settings} />}
       {tab === "language" && <LanguagePanel />}
-      {tab === "integrations" && <GithubConnection />}
+      {tab === "integrations" && (
+        <div className="space-y-4">
+          <GithubConnection />
+          <DaytonaConnection />
+        </div>
+      )}
     </div>
   );
 }

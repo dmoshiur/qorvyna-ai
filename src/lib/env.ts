@@ -80,12 +80,27 @@ export const env = {
   identityPepper: clean(process.env.IDENTITY_PEPPER ?? ""),
   adminBootstrapKey: clean(process.env.ADMIN_BOOTSTRAP_KEY ?? ""),
   github: {
-    clientId: clean(process.env.GITHUB_CLIENT_ID ?? ""),
-    clientSecret: clean(process.env.GITHUB_CLIENT_SECRET ?? ""),
-    tokenEncryptionKey: clean(process.env.GITHUB_TOKEN_ENCRYPTION_KEY ?? ""),
-    callbackUrl: clean(process.env.GITHUB_OAUTH_CALLBACK_URL ?? ""),
+    get clientId() { return clean(process.env.GITHUB_CLIENT_ID ?? ""); },
+    get clientSecret() { return clean(process.env.GITHUB_CLIENT_SECRET ?? ""); },
+    get tokenEncryptionKey() {
+      return clean(
+        process.env.GITHUB_TOKEN_ENCRYPTION_KEY ||
+          process.env.PROVIDER_SECRET_KEY ||
+          "",
+      );
+    },
+    get callbackUrl() { return clean(process.env.GITHUB_OAUTH_CALLBACK_URL ?? ""); },
   },
 } as const;
+
+// Daytona Cloud Sandbox config is read LIVE so runtime env changes and tests
+// are honored; API keys stay server-side only.
+export function daytonaConfig(): { apiKey: string; target: string } {
+  return {
+    apiKey: clean(process.env.DAYTONA_API_KEY ?? ""),
+    target: clean(process.env.DAYTONA_TARGET ?? ""),
+  };
+}
 
 // Vercel config is read LIVE (not snapshotted) so tests and runtime env changes
 // are honored; the token stays server-side only.
@@ -122,6 +137,18 @@ export function isGithubConfigured(): boolean {
   const github = env.github;
   return Boolean(github.clientId && github.clientSecret && github.tokenEncryptionKey.length >= 32) &&
     !PLACEHOLDERS.some((p) => github.clientId.includes(p) || github.clientSecret.includes(p));
+}
+
+/** True when GitHub tokens can be encrypted at rest (OAuth or saved PAT). */
+export function isGithubTokenStorageConfigured(): boolean {
+  return env.github.tokenEncryptionKey.length >= 32 &&
+    !PLACEHOLDERS.some((p) => env.github.tokenEncryptionKey.includes(p));
+}
+
+/** True when Daytona Cloud Sandbox has a server-side API key in env. */
+export function isDaytonaConfigured(): boolean {
+  const d = daytonaConfig();
+  return d.apiKey.length >= 16 && !PLACEHOLDERS.some((p) => d.apiKey.includes(p));
 }
 
 /** True when birth-certificate numbers can be hashed (never stored plaintext). */

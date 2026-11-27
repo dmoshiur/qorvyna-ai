@@ -72,6 +72,11 @@ env:
   - variable: GITHUB_OAUTH_CALLBACK_URL
     value: https://qorvyna.thamjj13.top/api/github/callback
     availability: [RUNTIME]
+  - variable: DAYTONA_API_KEY
+    availability: [RUNTIME]
+    secret: DAYTONA_API_KEY
+  - variable: DAYTONA_TARGET
+    availability: [RUNTIME]
 
   # Optional settings carry the product name as QORVYNA_<NAME> (for example
   # QORVYNA_TRUST_PROXY_HEADERS, QORVYNA_ANDROID_APK_URL). The former

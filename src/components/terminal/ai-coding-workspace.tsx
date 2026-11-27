@@ -5,10 +5,12 @@ import Link from "next/link";
 import {
   Activity,
   CheckCircle2,
+  CloudCog,
   Code2,
   Eye,
   FileCode2,
   FolderPlus,
+  Github,
   Play,
   RefreshCw,
   Save,
@@ -17,6 +19,8 @@ import {
   Terminal as TerminalIcon,
 } from "lucide-react";
 import { Alert, Badge, Button, Card } from "@/components/ui";
+import { DaytonaConnection } from "@/components/daytona-connection";
+import { GithubConnection } from "@/components/github-connection";
 
 interface WorkspaceProjectSummary {
   id: string;
@@ -75,7 +79,8 @@ export function AiCodingWorkspace() {
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [rightPane, setRightPane] = useState<"preview" | "ai">("preview");
+  const [rightPane, setRightPane] = useState<"preview" | "ai" | "daytona" | "github">("preview");
+  const [shellMode, setShellMode] = useState<"qsh" | "daytona">("qsh");
 
   // Terminal state
   const [commandInput, setCommandInput] = useState("");
@@ -189,6 +194,41 @@ export function AiCodingWorkspace() {
     if (!activeProject || !rawCmd.trim()) return;
     setRunningCmd(true);
     try {
+      if (shellMode === "daytona") {
+        const res = await fetch("/api/daytona", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "exec",
+            projectId: activeProject.id,
+            command: rawCmd.trim(),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            data.error === "DAYTONA_NOT_CONFIGURED"
+              ? "Configure your Daytona API key in the Daytona tab first."
+              : data.error ?? `HTTP ${res.status}`,
+          );
+        }
+        const r = data.result;
+        setHistory((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            command: `[daytona] ${rawCmd.trim()}`,
+            stdout: r.stdout || r.result || "",
+            stderr: "",
+            exitCode: r.exitCode ?? 0,
+            durationMs: r.durationMs ?? 1,
+            executionId: data.executionId,
+          },
+        ]);
+        setCommandInput("");
+        return;
+      }
+
       const res = await fetch("/api/terminal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -461,14 +501,14 @@ export function AiCodingWorkspace() {
               />
             </Card>
 
-            {/* Live Preview + AI Patch Reviewer */}
+            {/* Live Preview + AI Patch + Daytona Sandbox + GitHub PR */}
             <Card className="flex flex-col p-3 lg:col-span-4">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex gap-1">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-1">
+                <div className="flex flex-wrap gap-1">
                   <button
                     type="button"
                     onClick={() => setRightPane("preview")}
-                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium ${
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${
                       rightPane === "preview"
                         ? "bg-sky-500/15 text-sky-300"
                         : "text-[var(--fg-muted)] hover:bg-[var(--bg-subtle)]"
@@ -480,14 +520,38 @@ export function AiCodingWorkspace() {
                   <button
                     type="button"
                     onClick={() => setRightPane("ai")}
-                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium ${
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${
                       rightPane === "ai"
                         ? "bg-violet-500/15 text-violet-300"
                         : "text-[var(--fg-muted)] hover:bg-[var(--bg-subtle)]"
                     }`}
                   >
                     <Sparkles className="h-3.5 w-3.5" />
-                    AI Patch Studio
+                    AI Patch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRightPane("daytona")}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${
+                      rightPane === "daytona"
+                        ? "bg-emerald-500/15 text-emerald-300"
+                        : "text-[var(--fg-muted)] hover:bg-[var(--bg-subtle)]"
+                    }`}
+                  >
+                    <CloudCog className="h-3.5 w-3.5" />
+                    Daytona
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRightPane("github")}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${
+                      rightPane === "github"
+                        ? "bg-amber-500/15 text-amber-300"
+                        : "text-[var(--fg-muted)] hover:bg-[var(--bg-subtle)]"
+                    }`}
+                  >
+                    <Github className="h-3.5 w-3.5" />
+                    GitHub PR
                   </button>
                 </div>
                 {activeProject && (
@@ -504,6 +568,25 @@ export function AiCodingWorkspace() {
                   srcDoc={previewSrcDoc}
                   className="min-h-[340px] w-full flex-1 rounded-lg border border-[var(--border)] bg-white"
                 />
+              ) : rightPane === "daytona" ? (
+                <div className="min-h-[340px] flex-1 overflow-y-auto">
+                  <DaytonaConnection projectId={activeProject?.id} />
+                </div>
+              ) : rightPane === "github" ? (
+                <div className="min-h-[340px] flex-1 overflow-y-auto">
+                  <GithubConnection
+                    showPush
+                    projectId={activeProject?.id}
+                    projectRevision={activeProject?.revision ?? 0}
+                    suggestedRepoName={activeProject?.title}
+                    files={files.map((f) => ({
+                      path: f.path,
+                      content: f.content,
+                      language: f.language ?? "text",
+                      encoding: f.encoding,
+                    }))}
+                  />
+                </div>
               ) : (
                 <div className="flex min-h-[340px] flex-1 flex-col gap-3 overflow-y-auto">
                   <textarea
@@ -565,16 +648,44 @@ export function AiCodingWorkspace() {
             </Card>
           </div>
 
-          {/* Governed Workspace Terminal (qsh) */}
+          {/* Governed Workspace Terminal (qsh + Daytona Cloud Sandbox) */}
           <Card className="p-4">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <TerminalIcon className="h-4 w-4 text-emerald-400" />
                 <span className="font-mono text-xs font-semibold">
-                  qsh — Governed Workspace Terminal
+                  {shellMode === "daytona"
+                    ? "Daytona Cloud Sandbox (@daytona/sdk)"
+                    : "qsh — Governed Workspace Terminal"}
                 </span>
+                <div className="inline-flex rounded-md border border-[var(--border)] bg-[var(--bg-subtle)] p-0.5 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setShellMode("qsh")}
+                    className={`rounded px-2 py-0.5 font-mono ${
+                      shellMode === "qsh" ? "bg-emerald-500/20 text-emerald-300" : "text-[var(--fg-muted)]"
+                    }`}
+                  >
+                    qsh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShellMode("daytona")}
+                    className={`rounded px-2 py-0.5 font-mono ${
+                      shellMode === "daytona" ? "bg-sky-500/20 text-sky-300" : "text-[var(--fg-muted)]"
+                    }`}
+                  >
+                    Daytona Sandbox
+                  </button>
+                </div>
                 <span className="text-[11px] text-[var(--fg-muted)]">
-                  (try <code>help</code>, <code>ls</code>, <code>validate</code>, <code>grep h1</code>, or <code>js Object.keys(PROJECT_FILES)</code>)
+                  {shellMode === "daytona" ? (
+                    <span>Runs inside ephemeral Daytona Sandbox via API key</span>
+                  ) : (
+                    <span>
+                      (try <code>help</code>, <code>ls</code>, <code>validate</code>, <code>grep h1</code>, or <code>js Object.keys(PROJECT_FILES)</code>)
+                    </span>
+                  )}
                 </span>
               </div>
               {history.length > 0 && (

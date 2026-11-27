@@ -851,7 +851,7 @@ export function ProjectWorkspace({
 
         {tab === "github" ? (
           <div className="h-full overflow-y-auto p-4 sm:p-6">
-            <div className="mx-auto max-w-lg">{project ? <GithubConnection files={files.map((file) => ({ path: file.path, content: file.content, language: file.language, encoding: file.encoding }))} showPush projectId={project.id} projectRevision={project.revision ?? 0} importDisabled={dirty || saveStatus === "saving" || saveStatus === "error" || savePaused || busy} onImport={importGithubFiles} /> : null}</div>
+            <div className="mx-auto max-w-lg">{project ? <GithubConnection files={files.map((file) => ({ path: file.path, content: file.content, language: file.language, encoding: file.encoding }))} showPush projectId={project.id} projectRevision={project.revision ?? 0} suggestedRepoName={project.title} importDisabled={dirty || saveStatus === "saving" || saveStatus === "error" || savePaused || busy} onImport={importGithubFiles} /> : null}</div>
           </div>
         ) : null}
       </div>

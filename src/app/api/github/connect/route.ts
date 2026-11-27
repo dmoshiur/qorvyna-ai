@@ -15,9 +15,10 @@ export async function GET(req: NextRequest) {
     const code = error instanceof GithubOAuthConfigError ? error.code : "GITHUB_APP_URL_INVALID";
     return NextResponse.json({ error: code, detail: "Set NEXT_PUBLIC_APP_URL to this service's HTTPS origin and register GITHUB_OAUTH_CALLBACK_URL as its /api/github/callback URL." }, { status: 503 });
   }
-  const user = await getSessionUser();
+  const user = await getSessionUser(req);
   if (!user) return NextResponse.redirect(new URL("/login?next=/chat?mode=agent", urls.origin), 303);
   const destination = githubReturnPath(req.nextUrl.searchParams.get("next"));
+  const popupMode = req.nextUrl.searchParams.get("mode") === "popup";
   if (!isGithubConfigured()) {
     return NextResponse.redirect(new URL(githubResultPath(destination, "not-configured"), urls.origin), 303);
   }
@@ -33,7 +34,13 @@ export async function GET(req: NextRequest) {
   authorize.searchParams.set("allow_signup", "true");
 
   const response = NextResponse.redirect(authorize);
-  for (const [name, value] of [["matrix_github_oauth", state], ["matrix_github_oauth_return", destination], ["matrix_github_oauth_owner", githubOwnerBinding(state, user.uid, env.github.tokenEncryptionKey)]]) {
+  const cookiesToSet: Array<[string, string]> = [
+    ["matrix_github_oauth", state],
+    ["matrix_github_oauth_return", destination],
+    ["matrix_github_oauth_owner", githubOwnerBinding(state, user.uid, env.github.tokenEncryptionKey)],
+    ...(popupMode ? [["matrix_github_oauth_mode", "popup"] as [string, string]] : []),
+  ];
+  for (const [name, value] of cookiesToSet) {
     response.cookies.set(name, value, {
       httpOnly: true,
       sameSite: "lax",

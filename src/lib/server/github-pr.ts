@@ -1,8 +1,8 @@
 import "server-only";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { adminDb, nowTs } from "@/lib/firebase/admin";
-import { env, isGithubConfigured } from "@/lib/env";
-import { branchHead, checkedTarget, githubRequest, writableRepository } from "@/lib/server/github";
+import { env } from "@/lib/env";
+import { branchHead, canStoreGithubTokens, checkedTarget, githubRequest, writableRepository } from "@/lib/server/github";
 
 export type PrInput = { repository: string; base: string; head: string; title: string; body: string };
 type Claims = { id: string; uid: string; digest: string; baseSha: string; headSha: string; expiresAt: number };
@@ -22,7 +22,7 @@ function encode(claims: Claims) {
 }
 function decode(token: string, uid: string, input: PrInput): Claims {
   const [payload, signed, extra] = token.split(".");
-  if (!isGithubConfigured() || !payload || !signed || extra || token.length > 2048) throw new Error("GITHUB_REVIEW_REQUIRED");
+  if (!canStoreGithubTokens() || !payload || !signed || extra || token.length > 2048) throw new Error("GITHUB_REVIEW_REQUIRED");
   const expected = Buffer.from(signature(payload)), actual = Buffer.from(signed);
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("GITHUB_REVIEW_REQUIRED");
   let claims: Claims;

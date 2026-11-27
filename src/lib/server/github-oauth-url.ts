@@ -45,14 +45,27 @@ function configuredOrigin(value: string): string {
   }
 }
 
-/** Only an owned chat page can be restored; never accept protocol-relative or
- * external destinations from the OAuth start URL or a forged cookie. */
+/** Only an allowlisted same-origin QORVYNA app page can be restored; never
+ * accept protocol-relative or external destinations from the OAuth start URL
+ * or a forged cookie. */
 export function githubReturnPath(value: string | null | undefined): string {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return "/chat?mode=agent";
   try {
     const url = new URL(value, "https://matrix.invalid");
-    if (url.origin !== "https://matrix.invalid" || !/^\/chat(?:\/[a-zA-Z0-9_-]{1,128})?$/.test(url.pathname)) return "/chat?mode=agent";
-    return `${url.pathname}?mode=agent`;
+    if (url.origin !== "https://matrix.invalid") return "/chat?mode=agent";
+    if (/^\/chat(?:\/[a-zA-Z0-9_-]{1,128})?$/.test(url.pathname)) {
+      return `${url.pathname}?mode=agent`;
+    }
+    if (url.pathname === "/settings") {
+      return "/settings?tab=integrations";
+    }
+    if (/^\/projects\/[a-zA-Z0-9_-]{1,128}$/.test(url.pathname)) {
+      return url.pathname;
+    }
+    if (url.pathname === "/terminal") {
+      return "/terminal";
+    }
+    return "/chat?mode=agent";
   } catch { return "/chat?mode=agent"; }
 }
 
