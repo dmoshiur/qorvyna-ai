@@ -280,6 +280,13 @@ describe("Priority 1C: Human-in-the-Loop Governance, Secret Scrubbing & Protecte
     expect(clean).not.toContain("ghp_123456");
     expect(clean).not.toContain("MIIEowIBAAKCAQEA");
   });
+
+  it("redacts the new AQ.Ab Gemini auth key format", () => {
+    const dirty = "gemini=AQ.Ab" + "X".repeat(48) + " trailing text";
+    const clean = scrubSecrets(dirty);
+    expect(clean).not.toContain("X".repeat(20));
+    expect(clean).toContain("<redacted>");
+  });
 });
 
 describe("Priority 1D & 1E: OpenTelemetry OTLP Export, Retention & Honest Token Economics", () => {

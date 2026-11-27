@@ -48,13 +48,13 @@ export function scrubSecrets(text: string): string {
     .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/gi, "<redacted-private-key>")
     .replace(/"([^"]*?(?:key|token|secret|password|passwd|credential|authorization|cookie)[^"]*?)":\s*"[^"]{3,}"/gi, (_m, key) => `"${key}": "<redacted>"`)
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer <redacted>")
-    .replace(/\b(sk-[A-Za-z0-9_-]{8,}|gsk_[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g, "<redacted>");
+    .replace(/\b(sk-[A-Za-z0-9_-]{8,}|gsk_[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,}|AQ\.Ab[A-Za-z0-9_-]{40,56}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g, "<redacted>");
 }
 
 export function containsSecretField(target: string, content?: string): boolean {
   if (PROTECTED_MEMORY_TARGETS.has(target.toLowerCase())) return true;
   if (SECRET_KEY_RE.test(target)) return true;
-  if (content && /\b(sk-[A-Za-z0-9]{8,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/.test(content)) {
+  if (content && /\b(sk-[A-Za-z0-9]{8,}|AIza[0-9A-Za-z_-]{20,}|AQ\.Ab[A-Za-z0-9_-]{40,56}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/.test(content)) {
     return true;
   }
   return false;

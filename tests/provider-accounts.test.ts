@@ -46,6 +46,8 @@ const GROQ_KEY = "gsk_" + "a".repeat(32);
 const OPENAI_KEY = "sk-" + "b".repeat(32);
 const ANTHROPIC_KEY = "sk-ant-" + "c".repeat(32);
 const GOOGLE_KEY = "AIza" + "d".repeat(35);
+// New Gemini "Auth key" format (AQ.Ab…, ~53 chars) introduced by Google in 2026.
+const GOOGLE_KEY_NEW = "AQ.Ab" + "e".repeat(48);
 
 function col(name: string) {
   return fakeDb.collection(name);
@@ -94,6 +96,7 @@ describe("provider key validation", () => {
     expect(validateProviderKey("openai", OPENAI_KEY)).toBe(OPENAI_KEY);
     expect(validateProviderKey("anthropic", ANTHROPIC_KEY)).toBe(ANTHROPIC_KEY);
     expect(validateProviderKey("google", GOOGLE_KEY)).toBe(GOOGLE_KEY);
+    expect(validateProviderKey("google", GOOGLE_KEY_NEW)).toBe(GOOGLE_KEY_NEW);
     expect(validateProviderKey("openai_compatible", "some-custom-key-1234567890abcdef")).toBe("some-custom-key-1234567890abcdef");
   });
 
