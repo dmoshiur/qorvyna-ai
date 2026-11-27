@@ -25,7 +25,7 @@ import {
   isQorvynaModelId,
 } from "@/lib/ai/model";
 import { DEFAULT_MODEL_KEY, modelLabel, type ModelSpec } from "@/lib/ai/models/registry";
-import { ensureAccounts, listAccounts } from "@/lib/ai/accounts";
+import { ensureAccounts, groqAccounts } from "@/lib/ai/accounts";
 
 export type AIRouteTarget = {
   provider: AIProviderName;
@@ -127,9 +127,10 @@ export function qorvynaModelRoute(): AIRouteTarget | null {
 
 /** Server credential for the hosted provider, or "" when none is installed. */
 export function hostedProviderKey(): string {
-  // The first connected account: the environment key when there is one,
-  // otherwise an account the administrator registered.
-  return listAccounts().find((account) => account.enabled)?.key ?? "";
+  // The first connected Groq account: the environment key when there is one,
+  // otherwise an account the administrator registered. Non-Groq credentials
+  // are never handed to the Groq client.
+  return groqAccounts().find((account) => account.enabled)?.key ?? "";
 }
 
 /**

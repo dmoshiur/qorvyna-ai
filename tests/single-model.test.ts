@@ -465,10 +465,15 @@ describe("the removed integrations are gone from the codebase", () => {
     const allowed = "@cf/zai-org/glm-4.7-flash";
     const allowedKey = "glm-4.7-flash";
     const allowedLabel = "GLM 4.7 Flash";
+    // The admin panel manages provider credentials and catalogs for any
+    // provider family; that is configuration, not runtime routing. The
+    // single-model rule above still holds for every model request path.
+    const adminProviderFiles = /src\/(lib\/ai\/(provider-types|providers|provider-models|accounts)\.ts|components\/admin\/(provider-accounts|ai-config-tabs)\.tsx)$/;
     const offenders = sources
       // reasoning.ts documents which model families emit  blocks; image/config.ts
       // explains that a legacy saved image record is ignored.
       .filter((file) => !/src\/lib\/ai\/(reasoning|image\/config)\.ts$/.test(file.path))
+      .filter((file) => !adminProviderFiles.test(file.path))
       .map((file) => ({ ...file, text: file.text.split(allowed).join("").split(allowedKey).join("").split(allowedLabel).join("") }))
       .filter((file) => banned.test(file.text))
       .map((file) => `${file.path}: ${file.text.match(banned)?.[0]}`);

@@ -1,28 +1,44 @@
-// Groq account manager.
+// Provider account manager.
 //
-// Administrators can connect several Groq credentials. Their organization
-// is not verified, so rate-limit windows are conservatively shared. This module is the one
-// place that knows about them:
+// Administrators can connect several provider credentials — multiple Groq keys
+// (whose organization is not verified, so rate-limit windows are conservatively
+// shared) and credentials for other providers (OpenAI, Anthropic, Google, any
+// OpenAI-compatible endpoint). This module is the one place that knows about
+// them:
 //
 //   • where the keys come from (environment + encrypted admin records),
-//   • what each account's limits currently are — read from the rate-limit
+//   • what each Groq account's limits currently are — read from the rate-limit
 //     headers Groq returns on every response, never guessed,
-//   • which account a request should use, and which to try next when one is
-//     limited, rejected or failing.
+//   • which Groq account a request should use, and which to try next when one
+//     is limited, rejected or failing.
 //
-// Rate limits are shared across credentials of unknown organization identity.
-// Authentication failures remain key-specific; process-local state is not a
-// substitute for a distributed organization-level quota service.
+// Rotation is Groq-only: `groqAccounts()` feeds the rotation helpers below and
+// the Groq client, while `listAccounts()` returns every connected account for
+// the admin panel. Rate limits are shared across Groq credentials of unknown
+// organization identity. Authentication failures remain key-specific;
+// process-local state is not a substitute for a distributed organization-level
+// quota service.
 import "server-only";
 import { createHash } from "node:crypto";
 import type { Db } from "@/lib/firebase/admin";
 import { nowTs } from "@/lib/firebase/admin";
 import { canEncryptSecrets, decryptSecret, encryptSecret } from "@/lib/ai/image/config";
 import { RpcError } from "@/lib/server/errors";
+import {
+  normalizeBaseUrl,
+  providerInfo,
+  validateProviderKey,
+  type ProviderType,
+} from "@/lib/ai/providers";
+import { keyHint as providerKeyHint } from "@/lib/ai/provider-types";
 
 export type ProviderAccount = {
   id: string;
   label: string;
+  /** Which provider family this credential belongs to. */
+  provider: ProviderType;
+  /** API base URL (Groq accounts use the Groq default). */
+  baseUrl: string;
   source: "env" | "admin";
   key: string;
   enabled: boolean;
@@ -90,7 +106,15 @@ export function envAccounts(): ProviderAccount[] {
   add(process.env.GROQ_API_KEY);
   for (let i = 2; i <= 8; i += 1) add(process.env[`GROQ_API_KEY_${i}`]);
   for (const part of (process.env.GROQ_API_KEYS ?? "").split(",")) add(part);
-  return keys.map((key, index) => ({ id: accountIdForKey(key), label: index === 0 ? "Primary (environment)" : `Environment account ${index + 1}`, source: "env" as const, key, enabled: true }));
+  return keys.map((key, index) => ({
+    id: accountIdForKey(key),
+    label: index === 0 ? "Primary (environment)" : `Environment account ${index + 1}`,
+    provider: "groq" as const,
+    baseUrl: providerInfo("groq")!.defaultBaseUrl,
+    source: "env" as const,
+    key,
+    enabled: true,
+  }));
 }
 
 /** Every connected account, environment first. One entry per distinct key. */
@@ -103,6 +127,14 @@ export function listAccounts(): ProviderAccount[] {
     out.push(account);
   }
   return out;
+}
+
+/**
+ * The Groq accounts only. Rotation, quota windows and the Groq client work on
+ * this subset — non-Groq credentials are never sent to the Groq API.
+ */
+export function groqAccounts(): ProviderAccount[] {
+  return listAccounts().filter((account) => account.provider === "groq");
 }
 
 function state(id: string): AccountState {
@@ -166,7 +198,7 @@ export type AccountChoice = { account: ProviderAccount | null; nextAvailableAt: 
  */
 export function selectAccount(model: string, estimatedTokens: number, exclude: ReadonlySet<string> = new Set()): AccountChoice {
   const now = clock();
-  const candidates = listAccounts().filter((account) => account.enabled && !exclude.has(account.id));
+  const candidates = groqAccounts().filter((account) => account.enabled && !exclude.has(account.id));
   let best: { account: ProviderAccount; headroom: number; used: number } | null = null;
   let soonest: number | null = null;
   for (const account of candidates) {
@@ -189,7 +221,7 @@ export function selectAccount(model: string, estimatedTokens: number, exclude: R
 export function nextAvailability(model: string, estimatedTokens = 0): number | null {
   const now = clock();
   let soonest: number | null = null;
-  for (const account of listAccounts().filter((item) => item.enabled)) {
+  for (const account of groqAccounts().filter((item) => item.enabled)) {
     const at = availableAt(account, model, estimatedTokens, now);
     if (at <= now) return null;
     soonest = soonest === null ? at : Math.min(soonest, at);
@@ -286,7 +318,7 @@ export function markFailure(id: string, model: string, detail: string): void {
 /** Why no account can serve `model` right now. */
 export function unavailableReason(model: string): "rate_limit" | "authentication" | "provider_unavailable" {
   const now = clock();
-  const accounts = listAccounts().filter((item) => item.enabled);
+  const accounts = groqAccounts().filter((item) => item.enabled);
   let invalid = 0;
   for (const account of accounts) {
     const current = state(account.id);
@@ -300,6 +332,9 @@ export function unavailableReason(model: string): "rate_limit" | "authentication
 export type AccountStatus = {
   id: string;
   label: string;
+  provider: ProviderType;
+  provider_label: string;
+  base_url: string;
   source: "env" | "admin";
   key_hint: string;
   enabled: boolean;
@@ -330,16 +365,22 @@ export function accountStatuses(): AccountStatus[] {
   const now = clock();
   return listAccounts().map((account) => {
     const current = state(account.id);
+    // Quota windows are only observed for Groq accounts; a non-Groq credential
+    // must never inherit another provider's shared window state.
+    const windows = account.provider === "groq" ? [...current.windows.entries()] : [];
     const recent = current.recent.filter(([at]) => now - at < 60_000);
-    const cooling = [...current.windows.values()].map((window) => window.cooldownUntil).filter((at) => at > now);
-    const failing = [...current.windows.values()].map((window) => window.failingUntil).filter((at) => at > now);
+    const cooling = windows.map(([, window]) => window.cooldownUntil).filter((at) => at > now);
+    const failing = windows.map(([, window]) => window.failingUntil).filter((at) => at > now);
     const status: AccountStatus["state"] = !account.enabled ? "disabled" : current.invalid && current.pausedUntil > now ? "invalid" : cooling.length ? "rate_limited" : failing.length ? "paused" : "ready";
     const until = Math.max(current.pausedUntil > now ? current.pausedUntil : 0, ...cooling, ...failing, 0);
     return {
       id: account.id,
       label: account.label,
+      provider: account.provider,
+      provider_label: providerInfo(account.provider)?.label ?? account.provider,
+      base_url: account.baseUrl,
       source: account.source,
-      key_hint: `…${account.key.slice(-4)}`,
+      key_hint: providerKeyHint(account.key),
       enabled: account.enabled,
       state: status,
       available_at: until ? iso(until) : null,
@@ -350,7 +391,7 @@ export function accountStatuses(): AccountStatus[] {
       tokens_last_minute: recent.reduce((sum, [, tokens]) => sum + tokens, 0),
       requests_total: current.requests,
       rotations_away: current.rotationsAway,
-      models: [...current.windows.entries()].map(([model, window]) => ({
+      models: windows.map(([model, window]) => ({
         model,
         limit_requests: window.limitRequests,
         remaining_requests: window.requestsResetAt > now ? window.remainingRequests : null,
@@ -380,11 +421,13 @@ export async function ensureAccounts(d: Db | null | undefined, force = false): P
       const snap = await d.collection(COLLECTION).get();
       const next: ProviderAccount[] = [];
       for (const doc of snap.docs) {
-        const data = doc.data() as { provider?: string; label?: string; api_key_encrypted?: string; enabled?: boolean };
-        if (data.provider !== "groq" || !data.api_key_encrypted) continue;
+        const data = doc.data() as { provider?: string; label?: string; base_url?: string; api_key_encrypted?: string; enabled?: boolean };
+        const provider = providerInfo(String(data.provider ?? ""));
+        if (!provider || !data.api_key_encrypted) continue;
         const key = secret(decryptSecret(data.api_key_encrypted));
         if (!key) continue; // encrypted with a secret this deployment no longer has
-        next.push({ id: accountIdForKey(key), label: String(data.label ?? "Groq account").slice(0, 60), source: "admin", key, enabled: data.enabled !== false });
+        const baseUrl = normalizeBaseUrl(String(data.base_url ?? "")) || provider.defaultBaseUrl;
+        next.push({ id: accountIdForKey(key), label: String(data.label ?? `${provider.label} account`).slice(0, 60), provider: provider.type, baseUrl, source: "admin", key, enabled: data.enabled !== false });
       }
       adminAccounts = next;
       adminLoadedAt = Date.now();
@@ -399,40 +442,63 @@ export async function ensureAccounts(d: Db | null | undefined, force = false): P
   return adminLoading;
 }
 
-export type StoredAccount = { doc_id: string; id: string; label: string; enabled: boolean; key_hint: string; created_at: string | null; readable: boolean };
+export type StoredAccount = {
+  doc_id: string;
+  id: string;
+  label: string;
+  provider: ProviderType;
+  provider_label: string;
+  base_url: string;
+  enabled: boolean;
+  key_hint: string;
+  created_at: string | null;
+  readable: boolean;
+};
 
 export async function listStoredAccounts(d: Db): Promise<StoredAccount[]> {
   const snap = await d.collection(COLLECTION).get();
-  return snap.docs
-    .filter((doc) => doc.data().provider === "groq")
-    .map((doc) => {
-      const data = doc.data() as { label?: string; enabled?: boolean; key_hint?: string; account_id?: string; api_key_encrypted?: string; created_at?: { toDate?: () => Date } };
-      return {
-        doc_id: doc.id,
-        id: String(data.account_id ?? ""),
-        label: String(data.label ?? "Groq account"),
-        enabled: data.enabled !== false,
-        key_hint: String(data.key_hint ?? ""),
-        created_at: data.created_at?.toDate?.().toISOString() ?? null,
-        readable: Boolean(data.api_key_encrypted && decryptSecret(data.api_key_encrypted)),
-      };
-    });
+  return snap.docs.map((doc) => {
+    const data = doc.data() as { provider?: string; label?: string; base_url?: string; enabled?: boolean; key_hint?: string; account_id?: string; api_key_encrypted?: string; created_at?: { toDate?: () => Date } };
+    const provider = providerInfo(String(data.provider ?? ""))?.type ?? "groq";
+    const baseUrl = String(data.base_url ?? "");
+    return {
+      doc_id: doc.id,
+      id: String(data.account_id ?? ""),
+      label: String(data.label ?? "Provider account"),
+      provider,
+      provider_label: providerInfo(provider)?.label ?? provider,
+      base_url: baseUrl || (providerInfo(provider)?.defaultBaseUrl ?? ""),
+      enabled: data.enabled !== false,
+      key_hint: String(data.key_hint ?? ""),
+      created_at: data.created_at?.toDate?.().toISOString() ?? null,
+      readable: Boolean(data.api_key_encrypted && decryptSecret(data.api_key_encrypted)),
+    };
+  });
 }
 
-/** Register a Groq key. The key is encrypted before it is written and is never returned. */
-export async function addStoredAccount(d: Db, input: { label: string; apiKey: string; addedBy: string }): Promise<{ doc_id: string; id: string }> {
-  const key = secret(input.apiKey);
-  if (!key || !/^gsk_[A-Za-z0-9_-]{20,}$/.test(key)) throw new RpcError("INVALID_API_KEY", 400, "That does not look like a Groq API key (it should start with gsk_).");
+/** Register a provider key. The key is encrypted before it is written and is never returned. */
+export async function addStoredAccount(
+  d: Db,
+  input: { label: string; apiKey: string; addedBy: string; provider?: string; baseUrl?: string },
+): Promise<{ doc_id: string; id: string }> {
+  const provider = providerInfo(input.provider ?? "groq");
+  if (!provider) throw new RpcError("INVALID_PROVIDER", 400, "That provider type is not supported.");
+  const key = validateProviderKey(provider.type, input.apiKey);
+  if (!key) throw new RpcError("INVALID_API_KEY", 400, `That does not look like a ${provider.label} API key (${provider.keyHint}).`);
+  const baseUrl = input.baseUrl?.trim() ? normalizeBaseUrl(input.baseUrl) : provider.defaultBaseUrl;
+  if (!baseUrl || !/^https?:\/\//.test(baseUrl)) throw new RpcError("INVALID_PROVIDER_BASE_URL", 400, "The API base URL must be a valid http(s) address.");
+  if (provider.baseUrlRequired && !input.baseUrl?.trim()) throw new RpcError("INVALID_PROVIDER_BASE_URL", 400, `${provider.label} needs an explicit API base URL.`);
   if (!canEncryptSecrets()) throw new RpcError("SECRET_STORAGE_UNAVAILABLE", 503, "Set PROVIDER_SECRET_KEY so keys can be stored encrypted.");
   const id = accountIdForKey(key);
   if (listAccounts().some((account) => account.id === id) || (await listStoredAccounts(d)).some((account) => account.id === id)) {
     throw new RpcError("ACCOUNT_EXISTS", 409, "This key is already connected.");
   }
   const ref = await d.collection(COLLECTION).add({
-    provider: "groq",
-    label: input.label.trim().slice(0, 60) || "Groq account",
+    provider: provider.type,
+    label: input.label.trim().slice(0, 60) || `${provider.label} account`,
+    base_url: baseUrl,
     api_key_encrypted: encryptSecret(key),
-    key_hint: `…${key.slice(-4)}`,
+    key_hint: providerKeyHint(key),
     account_id: id,
     enabled: true,
     added_by: input.addedBy,
@@ -446,9 +512,9 @@ export async function addStoredAccount(d: Db, input: { label: string; apiKey: st
 export async function updateStoredAccount(d: Db, docId: string, patch: { label?: string; enabled?: boolean }): Promise<void> {
   const ref = d.collection(COLLECTION).doc(docId);
   const snap = await ref.get();
-  if (!snap.exists || snap.data()?.provider !== "groq") throw new RpcError("NOT_FOUND", 404);
+  if (!snap.exists || !snap.data()?.provider) throw new RpcError("NOT_FOUND", 404);
   await ref.set({
-    ...(typeof patch.label === "string" ? { label: patch.label.trim().slice(0, 60) || "Groq account" } : {}),
+    ...(typeof patch.label === "string" ? { label: patch.label.trim().slice(0, 60) || "Provider account" } : {}),
     ...(typeof patch.enabled === "boolean" ? { enabled: patch.enabled } : {}),
     updated_at: nowTs(),
   }, { merge: true });
@@ -458,15 +524,31 @@ export async function updateStoredAccount(d: Db, docId: string, patch: { label?:
 export async function removeStoredAccount(d: Db, docId: string): Promise<void> {
   const ref = d.collection(COLLECTION).doc(docId);
   const snap = await ref.get();
-  if (!snap.exists || snap.data()?.provider !== "groq") throw new RpcError("NOT_FOUND", 404);
+  if (!snap.exists || !snap.data()?.provider) throw new RpcError("NOT_FOUND", 404);
   await ref.delete();
   await ensureAccounts(d, true);
+}
+
+/**
+ * Decrypt a stored account's credential for server-side use only (the admin
+ * "test" action). The key never leaves this server process.
+ */
+export async function storedAccountCredentials(d: Db, docId: string): Promise<{ provider: ProviderType; baseUrl: string; key: string } | null> {
+  const ref = d.collection(COLLECTION).doc(docId);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const data = snap.data() as { provider?: string; base_url?: string; api_key_encrypted?: string } | undefined;
+  const provider = providerInfo(String(data?.provider ?? ""));
+  if (!provider || !data?.api_key_encrypted) return null;
+  const key = secret(decryptSecret(data.api_key_encrypted));
+  if (!key) return null;
+  return { provider: provider.type, baseUrl: normalizeBaseUrl(String(data.base_url ?? "")) || provider.defaultBaseUrl, key };
 }
 
 /** Persist the current health picture so it survives a restart and is visible to admins. */
 export async function persistAccountStatus(d: Db): Promise<void> {
   const statuses = accountStatuses();
-  await Promise.all(statuses.map((status) => d.collection("provider_account_status").doc(status.id).set({ ...status, provider: "groq", updated_at: nowTs() }, { merge: false }).catch(() => undefined)));
+  await Promise.all(statuses.map((status) => d.collection("provider_account_status").doc(status.id).set({ ...status, updated_at: nowTs() }, { merge: false }).catch(() => undefined)));
 }
 
 // ---------------------------------------------------------------------------

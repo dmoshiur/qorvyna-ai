@@ -2,6 +2,13 @@
 
 Notable changes to QORVYNA. Newest first.
 
+## Admin provider accounts and custom models
+
+- The admin AI configuration "Providers & models" panel now manages credentials for multiple providers. Multiple Groq keys keep their live rate-limit rotation display, and OpenAI (ChatGPT), Anthropic (Claude), Google (Gemini) and any OpenAI-compatible endpoint can be connected from the same panel.
+- Keys are validated against the selected provider's key shape, encrypted before storage with the deployment's existing secret, and never returned after saving. Each account can be tested against the provider's live model catalog; the test reports the models the key can actually use.
+- Models can be attached to any connected provider account (model ID, label, optional context window) and enabled/disabled or removed. Model IDs are stored exactly as entered and are not invented.
+- Groq rotation stays isolated to Groq accounts: non-Groq credentials are never sent to the Groq API and never inherit its shared window state. Unit and route tests use a mocked catalog; no live provider call was made in this checkout.
+
 ## AI routing and pooled Groq coordination
 
 - Provider timeout boundaries now return even when an adapter ignores cancellation. The underlying non-cooperating operation can still run and consume resources.
