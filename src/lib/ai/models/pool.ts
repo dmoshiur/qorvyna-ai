@@ -12,6 +12,7 @@ import { adminDb, nowTs, type Db } from "@/lib/firebase/admin";
 import { fetchModelCatalog } from "@/lib/ai/model-catalog";
 import { QORVYNA_MODEL_BASE_URL } from "@/lib/ai/model";
 import { ensureAccounts } from "@/lib/ai/accounts";
+import { customRouteTargets } from "@/lib/server/provider-vault";
 import {
   cloudflareConfigured,
   cloudflareCredentials,
@@ -575,6 +576,9 @@ export async function resolvePool(
   const manual = !preference.auto;
   const intent: RouteIntent = options.intent ?? "conversation";
   const available = new Map(statuses.map((model) => [model.key, model]));
+  // Issue 8: the user's own enabled custom providers route their traffic first
+  // (their key, their quota). Strictly user-scoped inside the vault.
+  const customTargets: AIRouteTarget[] = d && uid ? await customRouteTargets(d, uid).catch(() => []) : [];
 
   const routeFor = (key: string): AIRouteTarget | null => {
     const status = available.get(key);
@@ -620,7 +624,7 @@ export async function resolvePool(
         };
       }
     }
-    return { targets: targets.slice(0, MAX_ACTIVE_MODELS), auto: false, skipped, intent, reason: options.reason ?? "Manual model selection", manual, degraded };
+    return { targets: [...customTargets, ...targets].slice(0, MAX_ACTIVE_MODELS), auto: false, skipped, intent, reason: options.reason ?? "Manual model selection", manual, degraded };
   }
 
   // Default to the primary model for all request classes. Cloudflare remains
@@ -638,7 +642,7 @@ export async function resolvePool(
   }
 
   return {
-    targets: targets.slice(0, MAX_ACTIVE_MODELS),
+    targets: [...customTargets, ...targets].slice(0, MAX_ACTIVE_MODELS),
     auto: true,
     skipped,
     intent,

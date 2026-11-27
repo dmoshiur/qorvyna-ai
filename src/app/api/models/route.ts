@@ -7,6 +7,7 @@ import { QORVYNA_MODEL } from "@/lib/ai/model";
 import { providerPublicCode } from "@/lib/ai/provider-error";
 import { MAX_ACTIVE_MODELS, getPoolPreference, listModelStatus, probeModelForRefresh, setPoolPreference } from "@/lib/ai/models/pool";
 import { MODEL_REGISTRY } from "@/lib/ai/models/registry";
+import { listUserProviders } from "@/lib/server/provider-vault";
 import { providerLatencyStats } from "@/lib/ai/provider-latency";
 import { mutationCsrfResponse } from "@/lib/server/request-security";
 
@@ -41,10 +42,11 @@ export async function GET(request: Request) {
   if (check) {
     await Promise.all(MODEL_REGISTRY.map((spec) => probeModelForRefresh(spec)));
   }
-  const [models, pool, settings] = await Promise.all([
+  const [models, pool, settings, customProviders] = await Promise.all([
     listModelStatus({ refresh: check }),
     getPoolPreference(d, user.uid),
     d.collection("user_security_settings").doc(user.uid).get().catch(() => null),
+    listUserProviders(d, user.uid).catch(() => []),
   ]);
   return NextResponse.json({
     model: {
@@ -64,6 +66,8 @@ export async function GET(request: Request) {
     max_active: MAX_ACTIVE_MODELS,
     reveal_mode: settings?.data()?.stream_reveal_mode ?? "adaptive",
     provider_telemetry: providerLatencyStats(),
+    // Issue 8: the user's own bring-your-own providers (never another user's).
+    custom_providers: customProviders,
   }, { headers: { "Cache-Control": "private, no-store" } });
 }
 
