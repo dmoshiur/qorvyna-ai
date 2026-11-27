@@ -1,3 +1,7 @@
+import { resolveDaytonaCredentials } from "@/lib/server/daytona";
+import { scrubSecrets } from "@/lib/agentops/governance";
+import { explicitSandboxCommand, requestsSandboxExecution } from "@/lib/ai/sandbox-intent";
+import type { SandboxOutput, SandboxResult } from "@/lib/server/conversation-sandbox";
 import { cancelAgentTask } from "@/lib/server/agent-tasks";
 import { classifyAgentOutput, requestsClarificationFirst, type PendingAgentTask } from "@/lib/ai/agent-execution";
 // =============================================================================
@@ -311,6 +315,8 @@ async function finalizeChat(d: Db, opts: {
   tier?: "high" | "low";
   steps?: WorkingStep[];
   taskContext?: PendingAgentTask | null;
+  sandboxOutput?: SandboxOutput;
+  sandboxAgentCommand?: string;
   /**
    * Regenerate: the assistant message this answer replaces. The document keeps
    * its id and position; the answer it held becomes a stored version.
@@ -320,7 +326,7 @@ async function finalizeChat(d: Db, opts: {
   const {
     provider, providerName, user, conversationId, isTemporary, message, redactedMessage, reply,
     history, redaction, started, model, mode, codingDetected, files = [], projectId = null, requestId, usage, usageStatus,
-    tier, steps, taskContext, replace = null,
+    tier, steps, taskContext, sandboxOutput, sandboxAgentCommand, replace = null,
   } = opts;
   const convRef = d.collection("conversations").doc(conversationId);
   let messageId: string | null = null;
@@ -345,6 +351,8 @@ async function finalizeChat(d: Db, opts: {
       ...(steps?.length ? { steps: steps.slice(0, 12) } : {}),
       ...(safeArtifacts.length ? { artifacts: safeArtifacts } : {}),
       ...(projectId ? { project_id: projectId } : {}),
+      ...(sandboxOutput ? { sandbox_output: sandboxOutput } : {}),
+      ...(sandboxAgentCommand ? { sandbox_agent_command: sandboxAgentCommand } : {}),
       ...(taskContext ? { agent_task: { ...taskContext, state: taskContext.state === "CONVERSATION" ? "CONVERSATION" : classifyAgentOutput(reply).state }, execution_state: taskContext.state === "CONVERSATION" ? "CONVERSATION" : classifyAgentOutput(reply).state } : {}),
     };
     if (replace) {
@@ -661,7 +669,8 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
   // The same detector the browser uses. A request that is real work never gets
   // a conversational reply in Agent mode: it is sent back to be executed.
   const requestIntent = detectBuildIntent(message, { mode, agentMode: mode === "agent", hasAttachments: attachments.length > 0, projectFileCount: activeProjectId ? 1 : 0 });
-  const agentExecutionRequired = mode === "agent" && (shouldRunBuildPipeline(requestIntent) || isCodingRequest(message, attachments));
+  const sandboxIntent = requestsSandboxExecution(message);
+  const agentExecutionRequired = mode === "agent" && !sandboxIntent && (shouldRunBuildPipeline(requestIntent) || isCodingRequest(message, attachments));
   if (agentExecutionRequired && !clarificationFirst && !clarificationFollowup) {
     return json({ error: "AGENT_RUNTIME_REQUIRED", detail: "Executable Agent work must use /api/build so files, task state, validation and deployment are persisted together.", conversation_id: convId, project_id: activeProjectId, ...(userMessageId ? { user_message_id: userMessageId } : {}) }, 409, requestId);
   }
@@ -689,7 +698,7 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
   const poolTargets = pool.targets;
   const targets = poolTargets.slice(0, 1);
   const selectedModel = targets[0]?.model ?? QORVYNA_MODEL_ID;
-  if (!targets.length) {
+  if (!targets.length && !sandboxIntent) {
     await logUsage(d, user.uid, "none", "chat", {}, Date.now() - started, "error", requestId);
     return json({ error: useAgentPolicy ? "CODING_MODEL_NOT_CONFIGURED" : "AI_GATEWAY_NOT_CONFIGURED", conversation_id: convId, ...(userMessageId ? { user_message_id: userMessageId } : {}) }, 503, requestId);
   }
@@ -822,6 +831,73 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
     mode,
     modelPool: poolTargets.map((t) => t.model),
   });
+
+  // Sandbox requests use a real, governed tool. A literal user command is
+  // executed directly (never rewritten by a model); otherwise ask the model to
+  // select run_command. We render only the tool result, not model narration.
+  if (sandboxIntent) {
+    let command = explicitSandboxCommand(message);
+    let cwd: string | undefined;
+    let timeoutMs: number | undefined;
+    if (!command && targets[0]?.client.supportsToolCalls) {
+      try {
+        const daytonaKey = (await resolveDaytonaCredentials())?.apiKey;
+        const modelMessage = daytonaKey ? message.split(daytonaKey).join("[redacted]") : message;
+        const selected = await completeWithModel(targets, {
+          messages: [
+            { role: "system", content: "Select run_command only when the user explicitly asks to execute a command. Never invent a command. Do not claim execution without a tool result." },
+            { role: "user", content: scrubSecrets(redactPII(modelMessage).redacted).replace(/\bdtn_[a-zA-Z0-9_-]+\b/g, "[redacted]").replace(/\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)\b/g, "[redacted]") },
+          ],
+          tools: [{ type: "function", function: { name: "run_command", description: "Execute a user-requested command in the governed sandbox.", parameters: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeout_ms: { type: "number" } }, required: ["command"], additionalProperties: false } } }],
+          temperature: 0, maxTokens: 512, requestId,
+        });
+        const call = selected.response.toolCalls?.find((item) => item.function.name === "run_command");
+        if (call) {
+          const args: unknown = JSON.parse(call.function.arguments);
+          if (args && typeof args === "object" && !Array.isArray(args)) {
+            const obj = args as Record<string, unknown>;
+            if (typeof obj.command === "string") command = obj.command;
+            if (typeof obj.cwd === "string") cwd = obj.cwd;
+            if (typeof obj.timeout_ms === "number" && Number.isFinite(obj.timeout_ms)) timeoutMs = obj.timeout_ms;
+          }
+        }
+      } catch { /* no selected command: report honestly below */ }
+    }
+    let result: SandboxResult | null = null;
+    if (command && !containsCredentials(command)) {
+      // This dedicated flow is enabled only by an explicit execution request;
+      // unlike general model tools it is not advertised elsewhere. The gateway
+      // independently checks device scope, validates arguments and audits calls.
+      const tool = await executeAgentTool(d, user, "run_command", { conversationId: convId, mode: mode === "agent" ? "agent" : "chat", command, ...(cwd ? { cwd } : {}), ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, { executionId: agentOpsExecId });
+      result = (tool.data?.result as SandboxResult | undefined) ?? { ok: false, error: "COMMAND_NOT_ALLOWED", command: "[redacted]", message: tool.error === "DEVICE_SCOPE_DENIED" ? "This device is not authorized to run sandbox commands." : tool.error === "RATE_LIMITED" ? "Too many sandbox requests; please try again later." : "Sandbox execution could not be authorized or completed." };
+    }
+    const reply = result?.ok
+      ? result.output.timedOut ? "The live sandbox command timed out." : "The command ran in the live sandbox."
+      : result ? result.message : command ? "Execution is unavailable because the command appears to contain credentials. Remove them before retrying." : "I could not identify a command to execute. Send the exact command, or use the qsh terminal for safe read-only commands.";
+    const sandboxOutput = result?.ok ? result.output : undefined;
+    const sandboxAgentCommand = result && !result.ok && result.error === "AGENT_MODE_REQUIRED" ? result.command : undefined;
+    let stored: Awaited<ReturnType<typeof finalizeChat>> = { messageId: null, versions: [] };
+    try {
+      const target = targets[0];
+      if (target) {
+        stored = await finalizeChat(d, { provider: target.client, providerName: target.provider, user, conversationId: convId, isTemporary, message,
+          redactedMessage: redaction.redacted, reply, history, redaction, started, model: target.model, mode, codingDetected,
+          requestId, sandboxOutput, sandboxAgentCommand, replace: replaceTarget });
+      } else {
+        // A literal command can still run when the model pool is unavailable.
+        const metadata = { mode, ...(sandboxOutput ? { sandbox_output: sandboxOutput } : {}), ...(sandboxAgentCommand ? { sandbox_agent_command: sandboxAgentCommand } : {}) };
+        if (replaceTarget) {
+          stored.versions = nextReplyVersions(replaceTarget.data);
+          await convRef.collection("messages").doc(replaceTarget.id).update({ content: reply, metadata: { ...metadata, versions: stored.versions }, updated_at: nowTs() });
+          stored.messageId = replaceTarget.id;
+        } else stored.messageId = (await convRef.collection("messages").add({ role: "assistant", content: reply, metadata, created_at: nowTs() })).id;
+      }
+    } catch { /* reply remains truthful even if persistence is unavailable */ }
+    await agentOpsHandle({ type: "execution.end", executionId: agentOpsExecId, status: result?.ok ? "completed" : "failed", outcome: result?.ok ? "success" : "tool_failure", endedAt: Date.now(), totalDurationMs: Math.max(1, Date.now() - started) });
+    return json({ reply, conversation_id: convId, mode, ...(targets[0] ? { model: targets[0].model, provider: targets[0].provider } : {}),
+      ...(stored.messageId ? { message_id: stored.messageId } : {}), ...(userMessageId ? { user_message_id: userMessageId } : {}),
+      ...(sandboxOutput ? { sandbox_output: sandboxOutput } : {}), ...(sandboxAgentCommand ? { sandbox_agent_command: sandboxAgentCommand } : {}) }, 200, requestId);
+  }
 
   // --- Provider streaming path (Chat and Agent) --------------------------------
   if (wantStream && mode !== "agent" && targets[0]?.client.streamChat) {

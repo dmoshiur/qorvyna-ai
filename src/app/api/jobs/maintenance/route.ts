@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { adminConfigured, adminDb, nowTs } from "@/lib/firebase/admin";
+import { cleanupConversationSandboxes } from "@/lib/server/conversation-sandbox";
 import { recoverInterruptedRuns } from "@/lib/server/build-resume";
 import { cleanupExecutionSessions } from "@/lib/server/execution-env";
 import { ensureAccounts, persistAccountStatus } from "@/lib/ai/accounts";
@@ -31,9 +32,10 @@ export async function POST(request: Request) {
   const result: Record<string, unknown> = {};
   const errors: string[] = [];
   try { result.cleanup = await cleanupExecutionSessions(d); } catch { errors.push("cleanup"); }
+  try { result.sandboxRecordsPruned = await cleanupConversationSandboxes(d); } catch { errors.push("sandbox_cleanup"); }
   try { await ensureAccounts(d, true); await persistAccountStatus(d); result.accounts = "stored"; } catch { errors.push("accounts"); }
   try { result.recovered = await recoverInterruptedRuns(d, { limit: 2, budgetMs: 230_000 }); } catch { errors.push("recovery"); }
   try { result.agentopsPruned = await getServerAgentOps().pruneRetention(); } catch { /* non-fatal */ }
   await d.collection("system_settings").doc("maintenance_worker").set({ last_run_at: nowTs(), errors, result: JSON.parse(JSON.stringify(result)) }, { merge: true }).catch(() => undefined);
-  return NextResponse.json({ ...result, errors }, { status: errors.length === 3 ? 503 : 200, headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json({ ...result, errors }, { status: errors.length >= 4 ? 503 : 200, headers: { "Cache-Control": "no-store" } });
 }

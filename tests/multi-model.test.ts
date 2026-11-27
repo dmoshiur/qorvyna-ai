@@ -22,11 +22,11 @@ import { GET as getModels, PUT as putModels } from "../src/app/api/models/route"
 import { sharedFirestoreStub } from "./helpers/firestore-stub";
 import { QORVYNA_MODEL_ID } from "../src/lib/ai/model";
 import { MODEL_REGISTRY, modelById, modelByKey, modelTpm, sanitizeModelKeys, isRegisteredModelId } from "../src/lib/ai/models/registry";
-import { listModelStatus, resolvePool, setPoolPreference, MAX_ACTIVE_MODELS } from "../src/lib/ai/models/pool";
+import { listModelStatus, recordModelProbeResult, resetModelHealthForTests, resolvePool, setPoolPreference, MAX_ACTIVE_MODELS } from "../src/lib/ai/models/pool";
 import { classifyTask, executionWaves, isSimpleRequest, planCollaboration, wantsSeparateAnswers } from "../src/lib/ai/orchestrator/plan";
 import { digestTurns, estimateMessages, selectConversationContext, selectRelevantFiles } from "../src/lib/ai/orchestrator/context";
 import { coolDown, cooldownRemainingMs, reserveTokens, resetScheduler, tokensUsedLastMinute } from "../src/lib/ai/orchestrator/scheduler";
-import { compareOutputs, completeWithFallback, completeWithRole, runCollaboration, streamWithFallback, synthesisBrief, type TaskResult } from "../src/lib/ai/orchestrator/run";
+import { compareOutputs, completeWithFallback, completeWithRole, fallbackBackoffMs, runCollaboration, streamWithFallback, synthesisBrief, type TaskResult } from "../src/lib/ai/orchestrator/run";
 import { AIProviderError } from "../src/lib/ai/provider-error";
 import { resetAccountsForTests } from "../src/lib/ai/accounts";
 import { resetHealthCacheForTests } from "../src/lib/ai/provider-health";
@@ -35,6 +35,7 @@ import type { AIRouteTarget } from "../src/lib/ai/config";
 import type { CompletedAIResponse } from "../src/lib/ai/executor";
 import type { Db } from "../src/lib/firebase/admin";
 import { runBuildPipeline } from "../src/lib/server/build";
+import { claimResume } from "../src/lib/server/continuation";
 import { FirestoreDeploymentProvider } from "../src/lib/deploy/firestore-provider";
 
 const stub: FirestoreStub = sharedFirestoreStub();
@@ -66,6 +67,53 @@ function fakeComplete(opts: { fail?: Record<string, AIProviderError | Error>; de
 const unavailable = (model: string) => new AIProviderError({ provider: "Groq", model, type: "provider_unavailable", detail: "503" });
 
 beforeEach(() => { resetScheduler(); resetAccountsForTests(); });
+
+
+describe("durable model verification", () => {
+  it("survives a fresh process, keeps the latest success, and does not erase it on failure", async () => {
+    const key = "gpt-oss-120b";
+    stub._state.docs.delete(`model_verifications/${key}`);
+    resetModelHealthForTests();
+    const record = (ok: boolean, at: string) => recordModelProbeResult(key, {
+      ok, state: ok ? "available" : "rate_limited", code: ok ? "OK" : "429", message: "test", status: ok ? 200 : 429, at,
+    });
+    await record(true, "2026-11-27T12:00:00.000Z");
+    await record(true, "2026-11-27T11:00:00.000Z");
+    await record(false, "2026-11-27T13:00:00.000Z");
+    resetModelHealthForTests();
+    expect((await listModelStatus()).find((model) => model.key === key)?.last_tested_at).toBe("2026-11-27T12:00:00.000Z");
+    stub._state.docs.delete(`model_verifications/${key}`);
+  });
+});
+
+describe("build fallback backoff", () => {
+  it("backs off 5, 15 and 45 seconds, capped at a minute", () => {
+    expect([1, 2, 3, 4].map((attempt) => fallbackBackoffMs(attempt, 5000))).toEqual([5000, 15000, 45000, 60000]);
+  });
+  it("rejects manual continuation before the provider retry deadline", async () => {
+    const id = "retry-not-ready-test";
+    const user = { uid: "retry-user", email: null, emailVerified: true };
+    const now = Date.now();
+    stub._state.docs.set(`build_runs/${id}`, { owner_id: user.uid, resume: { prompt: "test", segment: 1 }, run: { status: "paused", continuation: { reason: "provider_unavailable", retryAt: now + 5000 } } });
+    try {
+      await expect(claimResume(stub as unknown as Db, user, id, now)).rejects.toMatchObject({ code: "RETRY_NOT_READY" });
+      await expect(claimResume(stub as unknown as Db, user, id, now + 5000)).resolves.toMatchObject({ state: { prompt: "test" } });
+    } finally { stub._state.docs.delete(`build_runs/${id}`); }
+  });
+  it("waits before the next candidate, not after the final failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeComplete({ fail: { [QORVYNA_MODEL_ID]: unavailable(QORVYNA_MODEL_ID), [QWEN]: unavailable(QWEN) } });
+      const pending = completeWithFallback(POOL3.slice(0, 2), () => ({ messages: [{ role: "user", content: "hello" }] }), { complete: fake.complete, backoffMs: 5000 });
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(fake.calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
+      expect(fake.calls).toHaveLength(2);
+      expect(result.attempts.map((attempt) => attempt.model)).toEqual([QORVYNA_MODEL_ID, QWEN]);
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 // ---------------------------------------------------------------------------
 describe("model registry", () => {
@@ -481,6 +529,14 @@ describe("gateway end to end", () => {
     expect(saved).toEqual({ auto: false, enabled: ["qwen3-32b"] });
     await expect(setPoolPreference(stub as unknown as Db, "multi-model-user", { auto: false, enabled: ["llama-3.3-70b"] })).rejects.toThrow("MODEL_UNAVAILABLE");
     expect(MAX_ACTIVE_MODELS).toBe(4);
+  });
+
+  it("does not substitute a disabled default model in a strict build selection", async () => {
+    catalog = [QORVYNA_MODEL_ID];
+    await listModelStatus({ refresh: true });
+    const pool = await resolvePool(stub as unknown as Db, "multi-model-user", { auto: false, enabled: ["qwen3-32b"] }, { intent: "artifact", strictSelection: true });
+    expect(pool.targets).toEqual([]);
+    expect(pool.skipped.map((item) => item.key)).toEqual(["qwen3-32b"]);
   });
 
   it("the Models API lists every model with real config, saves the pool, and leaks no credential", async () => {

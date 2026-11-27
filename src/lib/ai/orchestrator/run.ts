@@ -128,23 +128,23 @@ export async function completeWithFallback(
       note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, index);
       // Wait before the next model takes over so a transient provider limit
       // can clear instead of the fallback hammering the same endpoint.
-      if (opts.backoffMs) await sleep(fallbackBackoffMs(index, opts.backoffMs), opts.signal);
+      if (opts.backoffMs && index + 1 < candidates.length) await sleep(fallbackBackoffMs(index + 1, opts.backoffMs), opts.signal);
     }
   }
-  // The scheduler steers work between models; it is not allowed to turn a
-  // request away altogether. If every candidate was only *deferred* (never
-  // tried), send the request to the first of them and let the provider decide.
-  if (!opts.signal?.aborted && deferred.length && !attempts.some((attempt) => attempt.outcome === "failed")) {
-    const target = deferred[0];
+  // A busy budget is a scheduling hint, not a provider failure. If no model
+  // succeeded, try each deferred candidate once rather than pausing while an
+  // enabled model has never been given a chance. Cooldowns remain respected.
+  for (const target of deferred) {
+    if (opts.signal?.aborted) break;
     const label = modelLabel(target.model);
     try {
       const completed = await complete([target], build(target));
-      note({ model: target.model, label, outcome: "ok", detail: "" }, 0);
+      note({ model: target.model, label, outcome: "ok", detail: "" }, attempts.length);
       return { completed, attempts };
     } catch (error) {
       if (opts.signal?.aborted) throw error;
       if (error instanceof AIProviderError && error.type === "rate_limit") coolDown(keyOf(target), error.retryAt ? Math.max(1_000, error.retryAt - Date.now()) : 30_000);
-      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, 0);
+      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, attempts.length);
     }
   }
   return { completed: null, attempts };

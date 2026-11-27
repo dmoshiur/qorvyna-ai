@@ -20,6 +20,7 @@
 // never an endless loader, and never a simulated reasoning trace.
 // =============================================================================
 
+import { requestsSandboxExecution } from "@/lib/ai/sandbox-intent";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -1569,7 +1570,9 @@ export function ChatClient({
     };
 
     try {
-      armIdleTimer(isAgentRun ? 180_000 : CONNECT_TIMEOUT_MS, controller);
+      // Creating a sandbox can take longer than the first-byte budget for a
+      // normal streaming chat; the response is a non-streamed tool result.
+      armIdleTimer(isAgentRun || requestsSandboxExecution(message) ? 180_000 : CONNECT_TIMEOUT_MS, controller);
       const requestBody = JSON.stringify({
         action: isImage ? "image" : isOrchestrator ? "orchestrate" : "chat",
         stream: !isImage && !isOrchestrator && messageMode !== "agent",
@@ -1641,6 +1644,8 @@ export function ChatClient({
           steps?: WorkingStep[];
           duration_ms?: number;
           theme_gallery?: boolean;
+          sandbox_output?: MessageMetadata["sandbox_output"];
+          sandbox_agent_command?: string;
           storage_degraded?: boolean;
           image?: { data_url?: string };
           analytics?: PipelineAnalytics;
@@ -1682,6 +1687,8 @@ export function ChatClient({
           if (data.steps?.length) streamMetadata.steps = data.steps;
           if (typeof data.duration_ms === "number") streamMetadata.duration_ms = data.duration_ms;
           streamMetadata.action = data.theme_gallery ? "theme_gallery" : undefined;
+          streamMetadata.sandbox_output = data.sandbox_output;
+          streamMetadata.sandbox_agent_command = data.sandbox_agent_command;
           commit(data.reply);
           maybeAutoSpeak(data.reply);
           if (data.storage_degraded) setNotice("The assistant replied, but the chat could not be saved to storage right now.");
@@ -2069,6 +2076,16 @@ export function ChatClient({
       return;
     }
 
+    if (mode === "agent" && /\bpush\b[^\n]{0,100}\bgithub\b|\bgithub\b[^\n]{0,100}\bpush\b/i.test(rawMessage)) {
+      // The existing panel performs connection checks and requires the user to
+      // choose the project/files before any real push can happen.
+      setGithubPanelOpen(true);
+    }
+    if (requestsSandboxExecution(rawMessage)) {
+      await streamMessage(message, { attachments: pending, imageStoragePath: null, intent, turnId, audioAssetId, ...flow });
+      return;
+    }
+
     // --- build / publish intent (§2, §25, §26) ----------------------------
     // "Make it", "build this website and publish it" run the real pipeline:
     // plan → files → build → validate → publish. A plain question never gets
@@ -2194,7 +2211,13 @@ export function ChatClient({
     githubChangeTemplateRef.current = null;
     setGithubPanelOpen(false);
     switchMode("agent");
-    const projects = await rpc<Array<{ id: string; title: string }>>("project_list").catch(() => [] as Array<{ id: string; title: string }>);
+    let projects: Array<{ id: string; title: string }>;
+    try {
+      projects = await rpc<Array<{ id: string; title: string }>>("project_list");
+    } catch {
+      setNotice("Projects could not be loaded. Try again before choosing a project or starting a new build.");
+      return;
+    }
     if (!projects.length) {
       setNotice("No projects yet — I'll start a new build. GitHub push becomes available after the build is reviewed.");
       void send(undefined, GITHUB_CHANGE_CREATE_PROMPT);
@@ -2955,6 +2978,15 @@ export function ChatClient({
             onCopyVersion={copyMessage}
             onRunWithAgent={isLatest && !isTemporary ? runLatestRequestWithAgent : undefined}
           />
+          {message.metadata?.sandbox_output ? <div className="mt-3 rounded-xl border border-border bg-surface-2 p-3 text-xs" aria-label="Live sandbox output">
+            <p className="mb-2 font-semibold text-ink">Live sandbox output · exit {message.metadata.sandbox_output.exitCode ?? "timeout"}</p>
+            <p className="font-mono text-ink-3">$ {message.metadata.sandbox_output.command}</p>
+            <p className="mt-2 font-semibold text-ink-3">stdout</p><pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-ink">{message.metadata.sandbox_output.stdout || "(empty)"}</pre>
+            <p className="mt-2 font-semibold text-ink-3">stderr</p><pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-ink">{message.metadata.sandbox_output.stderr || "(empty)"}</pre>
+          </div> : null}
+          {message.metadata?.sandbox_agent_command ? <div className="mt-3 rounded-xl border border-border bg-surface-2 p-3 text-sm">
+            <button type="button" className="font-semibold text-accent" onClick={() => { switchMode("agent"); setInput(`Run this command in your sandbox: ${message.metadata?.sandbox_agent_command ?? ""}`); }}>Run this in Agent mode →</button>
+          </div> : null}
         </div>
       </div>
     );
@@ -3218,7 +3250,10 @@ export function ChatClient({
                         githubChangeTemplateRef.current = null;
                         const prompt = template ? template(choice.title) : lastBuildPromptRef.current;
                         const waiting = lastBuildIntentRef.current;
-                        if (prompt && waiting && !streaming) {
+                        if (template && prompt) {
+                          setInput(`${prompt} `);
+                          setNotice(`Selected ${choice.title}. Describe the change before sending; GitHub push is available after review.`);
+                        } else if (prompt && waiting && !streaming) {
                           setFailure(null);
                           void runBuildTurn(prompt, waiting, crypto.randomUUID(), lastAttachmentsRef.current, lastBuildWorkspaceOnlyRef.current, lastBuildTaskRef.current, lastBuildVisibleRef.current ?? undefined, { reuseUser: true });
                         } else {

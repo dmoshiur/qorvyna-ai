@@ -23,10 +23,10 @@ import { recordProviderCall } from "@/lib/ai/provider-latency";
  * so the "Last verified" timestamp on a model card reflects actual use rather
  * than only an explicit connection test.
  */
-function markModelVerified(model: string): void {
+async function markModelVerified(model: string): Promise<void> {
   const spec = modelById(model);
   if (!spec) return;
-  recordModelProbeResult(spec.key, {
+  await recordModelProbeResult(spec.key, {
     ok: true,
     state: "available",
     code: "OK",
@@ -224,7 +224,7 @@ export async function completeWithModel(
         });
       }
       recordProviderCall(target.provider, target.model, Math.max(1, Date.now() - attemptStartedAt), true);
-      markModelVerified(target.model);
+      await markModelVerified(target.model);
       return { target, response };
     } catch (error) {
       if (request.signal?.aborted) throw error;
@@ -297,7 +297,7 @@ export async function* streamWithModel(
           retryable: true,
         });
       }
-      markModelVerified(target.model);
+      await markModelVerified(target.model);
       return;
     } catch (error) {
       if (request.signal?.aborted) throw error;

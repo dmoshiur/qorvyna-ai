@@ -188,17 +188,19 @@ function ModelPanel({ data, setData, onReload, loadFailed }: { data: ModelPoolPa
   const showAuto = !query.trim() || "auto automatic".includes(query.trim().toLowerCase());
 
   async function apply(next: PoolPreference) {
-    if (!data || saving) return;
+    if (!data || saving) return false;
     const previous = data.pool;
     setData((current) => (current ? { ...current, pool: next } : current));
     setSaving(true); setError("");
     try {
       const saved = await saveModelPool(next);
       setData((current) => (current ? { ...current, pool: saved } : current));
+      return true;
     } catch (cause) {
       setData((current) => (current ? { ...current, pool: previous } : current));
       const code = cause instanceof Error ? cause.message : "";
       setError(code === "MODEL_UNAVAILABLE" ? "That model is not available right now." : "Your selection couldn't be saved. Try again.");
+      return false;
     } finally { setSaving(false); }
   }
 
@@ -207,7 +209,10 @@ function ModelPanel({ data, setData, onReload, loadFailed }: { data: ModelPoolPa
     const base = pool.auto ? [] : pool.enabled.filter((key) => data.models.some((item) => item.key === key && item.availability === "available"));
     const next = base.includes(model.key) ? base.filter((key) => key !== model.key) : [...base, model.key];
     if (next.length > data.max_active) { setError(`Up to ${data.max_active} models can work together. Turn one off first.`); return; }
-    void apply(next.length ? { auto: false, enabled: next } : { auto: true, enabled: [] });
+    const enabling = !base.includes(model.key);
+    void apply(next.length ? { auto: false, enabled: next } : { auto: true, enabled: [] }).then((ok) => {
+      if (ok && enabling) void runTest(model);
+    });
   }
 
   async function runTest(model: ModelStatus) {

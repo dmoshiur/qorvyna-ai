@@ -147,6 +147,7 @@ export async function executeAgentTool(
     uid: user.uid,
     email: user.email,
     requestId,
+    executionId,
     approvalId: opts.approvalId,
     dryRun: opts.dryRun ?? false,
   };

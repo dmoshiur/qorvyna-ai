@@ -121,7 +121,7 @@ export async function claimResume(d: Db, user: SessionUser, runId: string, now =
     if (!snap.exists || !data || data.owner_id !== user.uid) throw new RpcError("NOT_FOUND", 404);
     const state = parseResumeState(data.resume);
     if (!state) throw new RpcError("NOTHING_TO_RESUME", 409, "This build has no saved progress to continue.");
-    const run = (data.run ?? {}) as { status?: string; updatedAt?: number };
+    const run = (data.run ?? {}) as { status?: string; updatedAt?: number; continuation?: { retryAt?: number | null; reason?: string } };
     if (run.status === "succeeded" || run.status === "cancelled") throw new RpcError("NOTHING_TO_RESUME", 409, "This build already finished.");
     const claim = data.resume_claim as { at?: number } | null | undefined;
     if (claim?.at && now - claim.at < CLAIM_TTL_MS && (run.status === "running" || run.status === "requested") && now - Number(run.updatedAt ?? 0) < 180_000) {
@@ -132,6 +132,9 @@ export async function claimResume(d: Db, user: SessionUser, runId: string, now =
     }
     if (state.segment >= MAX_RUN_SEGMENTS) {
       throw new RpcError("CONTINUATION_LIMIT", 409, `This build was continued ${MAX_RUN_SEGMENTS - 1} times without finishing. Its files are saved in the project; send a new, smaller request to carry on.`);
+    }
+    if (run.status === "paused" && run.continuation?.reason === "provider_unavailable" && typeof run.continuation.retryAt === "number" && run.continuation.retryAt > now) {
+      throw new RpcError("RETRY_NOT_READY", 409, "The provider retry is not ready yet. Please wait before continuing.");
     }
     tx.set(ref, { resume_claim: { id: claimId, at: now }, updated_at: nowTs() }, { merge: true });
     const messageId = typeof data.resume_message_id === "string" && data.resume_message_id ? data.resume_message_id : state.messageId;
