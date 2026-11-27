@@ -64,6 +64,7 @@ never reach the browser or a prompt.
 9. [AI pipeline](#ai-pipeline)
    · [Identity and model transparency](#identity-and-model-transparency)
    · [Chat answers, the Agent executes](#chat-answers-the-agent-executes)
+   · [Sandbox execution (Daytona)](#sandbox-execution-daytona)
 10. [Context-aware UI & intent-driven responses](#context-aware-ui--intent-driven-responses)
 11. [Security model](#security-model)
 12. [Admin roles & permissions](#admin-roles--permissions)
@@ -189,6 +190,7 @@ firestore.indexes.json     composite indexes
 scripts/generate-brand-assets.mjs   every logo, favicon and app icon (npm run brand:assets)
 scripts/seed.mjs           seeds Firestore from seed/0007_seed.sql
 scripts/set-admin.mjs      promote a user to an admin role (+ custom claim)
+scripts/daytona-example.mjs  Daytona sandbox smoke test (npm run daytona:example)
 seed/0007_seed.sql         seed source of truth (original SQL seed)
 mobile/matrix_app, mobile/matrix_wear   Flutter apps for Android and Wear OS
 src-tauri/                 Tauri desktop shell
@@ -395,6 +397,40 @@ Every run ends as **Completed**, **Failed**, **Blocked** or **Awaiting approval*
 run and never from the model's own account of what it did. A chat reply that claims project work with no run
 behind it is labelled **Text only**. Details and the full reasoning:
 [docs/AI_IDENTITY_AND_EXECUTION.md](docs/AI_IDENTITY_AND_EXECUTION.md).
+
+### Sandbox execution (Daytona)
+
+Code and shell commands that the chat/Agent flows execute for users run in **[Daytona](https://www.daytona.io)
+Cloud Sandboxes** (`@daytona/sdk`), never on the host. Each run creates an **ephemeral** sandbox, executes,
+then deletes it — nothing lingers and no billable sandbox is left behind. Sandbox language is TypeScript,
+JavaScript or Python; output is scanned for secrets (`scrubSecrets` + the API key itself) before it reaches
+a user, and every action is written to `audit_logs`.
+
+| Concern | Where |
+|---|---|
+| SDK client, credentials, code/command execution | `src/lib/server/daytona.ts` |
+| Governed per-user execution for chat/Agent (lease, TTL, allowlist, network blocked) | `src/lib/server/conversation-sandbox.ts` |
+| HTTP API (status, configure, disconnect, code_run, exec) | `src/app/api/daytona/route.ts` |
+| Admin panel UI (Admin → AI configuration → Sandbox) | `src/components/daytona-connection.tsx` |
+
+Configuration is **system-wide**: an admin saves one API key in the admin panel (encrypted at rest with
+AES-256-GCM) or provides it through env. Regular users execute code through it but never see or set the key.
+
+```
+# Server-side env (alternative to the admin panel key):
+DAYTONA_API_KEY=dtn_...
+DAYTONA_TARGET=us                            # optional region
+DAYTONA_API_URL=https://app.daytona.io/api   # optional custom endpoint; server only
+```
+
+SDK note: in `@daytona/sdk` 2.x the sandbox-management methods (`create`, `get`, `delete`) moved from the
+root client to the `v0` namespace — `daytona.v0.create(...)`. `openDaytonaSdk()` in
+`src/lib/server/daytona.ts` resolves that transparently; `conversation-sandbox.ts` uses the `v0` client
+(`RootOnlyClientV0`) directly. Standalone smoke test (create → run code → shell → upload → delete):
+
+```
+DAYTONA_API_KEY=dtn_... npm run daytona:example
+```
 
 ## Context-aware UI & intent-driven responses
 

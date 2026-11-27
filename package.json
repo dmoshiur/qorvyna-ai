@@ -13,6 +13,7 @@
     "test:browser": "node scripts/browser-smoke.mjs",
     "brand:assets": "node scripts/generate-brand-assets.mjs",
     "worker:automations": "node scripts/automation-worker.mjs",
+    "daytona:example": "node scripts/daytona-example.mjs",
     "seed": "node scripts/seed.mjs",
     "seed:dry-run": "node scripts/seed.mjs --dry-run",
     "set-admin": "node scripts/set-admin.mjs",
