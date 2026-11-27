@@ -12,7 +12,18 @@ import { onModelPoolChange, saveModelPool, testModelConnection, visualStateForMo
 import { STRENGTH_LABEL, type ModelStatus, type PoolPreference } from "@/lib/ai/models/types";
 
 type DefaultModel = { health: "online" | "unavailable" | "not-configured" | "unchecked"; error: string | null; checked_at: string };
-type Payload = { model: DefaultModel; models: ModelStatus[]; pool: PoolPreference; max_active: number };
+type Payload = { model: DefaultModel; models: ModelStatus[]; pool: PoolPreference; max_active: number; custom_providers?: CustomProvider[] };
+/** Local mirror of the server's PublicUserProvider (provider-vault is server-only). */
+type CustomProvider = {
+  id: string;
+  name: string;
+  base_url: string;
+  key_mask: string;
+  models: { id: string; label: string }[];
+  enabled: boolean;
+  last_verified_at: string | null;
+  last_error: string | null;
+};
 
 function Capability({ on, label }: { on: boolean; label: string }) {
   return <li className="flex items-center gap-1.5 text-xs">
@@ -111,6 +122,62 @@ export function ModelsClient({ showChatLink = true }: { showChatLink?: boolean }
     } finally {
       setTestingKey("");
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Issue 8: bring-your-own providers (server-scoped to the signed-in user).
+  // -------------------------------------------------------------------------
+  const [customBusy, setCustomBusy] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addForm, setAddForm] = useState({ name: "", base_url: "", api_key: "", models: "" });
+  const [addError, setAddError] = useState("");
+
+  const customProviders = data?.custom_providers ?? [];
+
+  async function mutateProvider(id: string, patch: Record<string, unknown>) {
+    setCustomBusy(id);
+    setAddError("");
+    try {
+      const res = await fetch(`/api/ai/providers/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch), credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error("update_failed");
+      const body = await res.json();
+      setData((c) => (c ? { ...c, custom_providers: c.custom_providers?.map((p) => (p.id === id ? body.provider : p)) ?? [] } : c));
+    } catch { setError("Could not update that provider."); }
+    finally { setCustomBusy(""); }
+  }
+  async function deleteProvider(id: string) {
+    if (!confirm("Delete this provider and its stored key? This cannot be undone.")) return;
+    setCustomBusy(id);
+    try {
+      const res = await fetch(`/api/ai/providers/${id}`, { method: "DELETE", credentials: "same-origin" });
+      if (!res.ok) throw new Error("delete_failed");
+      setData((c) => (c ? { ...c, custom_providers: c.custom_providers?.filter((p) => p.id !== id) ?? [] } : c));
+    } catch { setError("Could not delete that provider."); }
+    finally { setCustomBusy(""); }
+  }
+  async function addProvider() {
+    setAddError("");
+    const models = addForm.models.split(",").map((m) => m.trim()).filter(Boolean).map((id) => ({ id, label: id }));
+    if (!addForm.name.trim() || !addForm.base_url.trim() || !addForm.api_key.trim() || models.length === 0) {
+      setAddError("Name, base URL, API key and at least one model ID are required.");
+      return;
+    }
+    setCustomBusy("new");
+    try {
+      const res = await fetch("/api/ai/providers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: addForm.name, base_url: addForm.base_url, api_key: addForm.api_key, models }), credentials: "same-origin",
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error ?? "add_failed");
+      setData((c) => (c ? { ...c, custom_providers: [...(c.custom_providers ?? []), body.provider] } : c));
+      setAddForm({ name: "", base_url: "", api_key: "", models: "" });
+      setAdding(false);
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : "Could not add the provider.");
+    } finally { setCustomBusy(""); }
   }
 
   const health = data?.model.health;
@@ -235,6 +302,81 @@ export function ModelsClient({ showChatLink = true }: { showChatLink?: boolean }
       </ul>
       <p className="text-xs text-ink-3">Availability is checked against the provider&apos;s live model list and server connectivity tests. Temporary upstream errors do not permanently disable models.</p>
       {showChatLink ? <Link href="/chat" className="btn btn-primary">Open chat</Link> : null}
+
+      {/* Issue 8 — bring-your-own providers */}
+      <section className="space-y-3" aria-label="Your AI providers">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight">Your AI providers</h2>
+            <p className="text-sm text-ink-2">Add your own OpenAI-compatible endpoint and API key. Keys are encrypted at rest and only used for your own requests.</p>
+          </div>
+          {!adding ? (
+            <Button variant="outline" onClick={() => setAdding(true)} disabled={Boolean(customBusy)}>Add provider</Button>
+          ) : null}
+        </div>
+        {adding ? (
+          <Card className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-xs text-ink-2">Display name
+                <input className="mt-1 w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" value={addForm.name} onChange={(e) => setAddForm({ ...addForm, name: e.target.value })} placeholder="My vLLM gateway" />
+              </label>
+              <label className="text-xs text-ink-2">Base URL
+                <input className="mt-1 w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" value={addForm.base_url} onChange={(e) => setAddForm({ ...addForm, base_url: e.target.value })} placeholder="https://api.openai.com/v1" />
+              </label>
+              <label className="text-xs text-ink-2">API key
+                <input type="password" className="mt-1 w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" value={addForm.api_key} onChange={(e) => setAddForm({ ...addForm, api_key: e.target.value })} placeholder="sk-…" />
+              </label>
+              <label className="text-xs text-ink-2">Model IDs (comma-separated)
+                <input className="mt-1 w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" value={addForm.models} onChange={(e) => setAddForm({ ...addForm, models: e.target.value })} placeholder="my-model-1, my-model-2" />
+              </label>
+            </div>
+            {addError ? <p className="text-xs font-medium text-danger">{addError}</p> : null}
+            <div className="flex gap-2">
+              <Button variant="primary" onClick={() => void addProvider()} disabled={customBusy === "new"}>Save &amp; test</Button>
+              <Button variant="ghost" onClick={() => { setAdding(false); setAddError(""); }}>Cancel</Button>
+            </div>
+          </Card>
+        ) : null}
+        {customProviders.length === 0 && !adding ? (
+          <p className="text-sm text-ink-3">No custom providers yet. Add one to route your traffic through your own model and key.</p>
+        ) : null}
+        <ul className="space-y-3">
+          {customProviders.map((provider) => (
+            <li key={provider.id}>
+              <Card className="space-y-2">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="flex flex-wrap items-center gap-2 text-lg font-semibold">
+                      {provider.name}
+                      <Badge className="!border-accent/40 !text-accent">Custom</Badge>
+                      {provider.enabled ? <Badge className="!border-success/40 !text-success">Enabled</Badge> : <Badge className="!border-warning/40 !text-warning">Disabled</Badge>}
+                    </h3>
+                    <p className="mt-0.5 truncate text-sm text-ink-2">{provider.base_url}</p>
+                    <p className="text-xs text-ink-3">Key {provider.key_mask}{provider.last_verified_at ? ` · verified ${new Date(provider.last_verified_at).toLocaleString()}` : ""}</p>
+                    {provider.last_error ? <p className="text-xs text-danger">{provider.last_error}</p> : null}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button variant="outline" className="!min-h-8 !px-2.5 !py-1 text-xs" onClick={() => void mutateProvider(provider.id, { test: true })} disabled={Boolean(customBusy)}>
+                      {customBusy === provider.id ? <Spinner /> : <Activity size={13} />} Test
+                    </Button>
+                    <button
+                      type="button" role="switch" aria-checked={provider.enabled} aria-label={`Use ${provider.name}`}
+                      onClick={() => void mutateProvider(provider.id, { enabled: !provider.enabled })}
+                      className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors", provider.enabled ? "bg-accent-solid" : "bg-surface-2 ring-1 ring-inset ring-border")}
+                    >
+                      <span className={cn("absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left]", provider.enabled ? "left-[22px]" : "left-0.5")} />
+                    </button>
+                    <Button variant="ghost" className="!min-h-8 !px-2.5 !py-1 text-xs !text-danger" onClick={() => void deleteProvider(provider.id)} disabled={Boolean(customBusy)}>Delete</Button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {provider.models.map((m) => <Badge key={m.id}>{m.label || m.id}</Badge>)}
+                </div>
+              </Card>
+            </li>
+          ))}
+        </ul>
+      </section>
     </> : null}
   </div>;
 }

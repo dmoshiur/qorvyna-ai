@@ -86,6 +86,34 @@ export function fallbackBackoffMs(attemptIndex: number, baseMs: number): number 
  * `backoffMs` is supplied, a provider failure waits before the next model is
  * tried so a single-model setup can recover without hammering the provider.
  */
+/**
+ * A provider error worth retrying in-session: the model/request may succeed
+ * shortly once a transient condition (rate limit, upstream blip, timeout) clears.
+ * Authentication and invalid-request errors are NOT retryable — another attempt
+ * with the same arguments would fail identically.
+ */
+function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof AIProviderError) {
+    return (
+      error.type === "rate_limit" ||
+      error.type === "provider_unavailable" ||
+      error.type === "network" ||
+      error.type === "timeout" ||
+      error.type === "billing"
+    );
+  }
+  if (error instanceof Error) return /timeout|econnreset|econnaborted|enetunreach|temporary|503|502|429|upstream/i.test(error.message);
+  return false;
+}
+
+/**
+ * In-session retries for a lone enabled model so it can ride out a transient
+ * provider error (e.g. a 429 rate limit) instead of failing the whole stage.
+ * Multi-model pools fall back to the next candidate immediately (only one try
+ * each), so a transient provider error on the primary still triggers a switch.
+ */
+const PER_MODEL_MAX_ATTEMPTS = 4; // initial attempt + 3 exponential backoff retries
+
 export async function completeWithFallback(
   candidates: readonly AIRouteTarget[],
   build: (target: AIRouteTarget) => CompleteRequest,
@@ -94,9 +122,11 @@ export async function completeWithFallback(
   const complete = opts.complete ?? completeWithModel;
   const attempts: ModelAttempt[] = [];
   const deferred: AIRouteTarget[] = [];
-  const note = (attempt: ModelAttempt, index: number): void => {
+  let attemptIndex = 0;
+  const note = (attempt: ModelAttempt): void => {
+    opts.onAttempt?.(attempt, attemptIndex);
     attempts.push(attempt);
-    opts.onAttempt?.(attempt, index);
+    attemptIndex += 1;
   };
   for (let index = 0; index < candidates.length; index += 1) {
     const target = candidates[index];
@@ -113,22 +143,39 @@ export async function completeWithFallback(
       note({
         model: target.model, label, outcome: "skipped",
         detail: reservation.reason === "cooldown" ? "rate-limited by the provider" : reservation.reason === "too_large" ? "request is larger than this model's per-minute token budget" : "per-minute token budget is in use",
-      }, index);
+      });
       if (reservation.reason !== "cooldown") deferred.push(target);
       continue;
     }
-    try {
-      const completed = await complete([target], request);
-      reservation.release(completed.response.usage?.totalTokens);
-      note({ model: target.model, label, outcome: "ok", detail: "" }, index);
-      return { completed, attempts };
-    } catch (error) {
-      if (opts.signal?.aborted) throw error;
-      if (error instanceof AIProviderError && error.type === "rate_limit") coolDown(keyOf(target), error.retryAt ? Math.max(1_000, error.retryAt - Date.now()) : 30_000);
-      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, index);
-      // Wait before the next model takes over so a transient provider limit
-      // can clear instead of the fallback hammering the same endpoint.
-      if (opts.backoffMs && index + 1 < candidates.length) await sleep(fallbackBackoffMs(index + 1, opts.backoffMs), opts.signal);
+    // A single enabled model retries with exponential backoff (5s → 15s → 45s,
+    // capped) so a transient provider error clears; a multi-model pool falls
+    // back to the next candidate after a single attempt.
+    const maxTries = candidates.length === 1 ? PER_MODEL_MAX_ATTEMPTS : 1;
+    for (let tryIndex = 0; tryIndex < maxTries; tryIndex += 1) {
+      if (opts.signal?.aborted) break;
+      try {
+        const completed = await complete([target], request);
+        reservation.release(completed.response.usage?.totalTokens);
+        note({ model: target.model, label, outcome: "ok", detail: "" });
+        return { completed, attempts };
+      } catch (error) {
+        if (opts.signal?.aborted) throw error;
+        if (error instanceof AIProviderError && error.type === "rate_limit") coolDown(keyOf(target), error.retryAt ? Math.max(1_000, error.retryAt - Date.now()) : 30_000);
+        const retryable = isTransientProviderError(error);
+        note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" });
+        // Retry a transient error on the same model with exponential backoff.
+        // A non-transient error (auth/invalid) stops immediately so it is
+        // reported without wasting the backoff budget.
+        if (!retryable || tryIndex + 1 >= maxTries || !opts.backoffMs) break;
+        await sleep(fallbackBackoffMs(tryIndex + 1, opts.backoffMs), opts.signal);
+      }
+    }
+    reservation.release();
+    // A lone model that exhausted its retries, or any model that failed with a
+    // non-transient error, yields to the next candidate. Back off first so a
+    // transient provider limit clears before the next model is tried.
+    if (opts.backoffMs && index + 1 < candidates.length) {
+      await sleep(fallbackBackoffMs(index + 1, opts.backoffMs), opts.signal);
     }
   }
   // A busy budget is a scheduling hint, not a provider failure. If no model
@@ -139,12 +186,12 @@ export async function completeWithFallback(
     const label = modelLabel(target.model);
     try {
       const completed = await complete([target], build(target));
-      note({ model: target.model, label, outcome: "ok", detail: "" }, attempts.length);
+      note({ model: target.model, label, outcome: "ok", detail: "" });
       return { completed, attempts };
     } catch (error) {
       if (opts.signal?.aborted) throw error;
       if (error instanceof AIProviderError && error.type === "rate_limit") coolDown(keyOf(target), error.retryAt ? Math.max(1_000, error.retryAt - Date.now()) : 30_000);
-      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" }, attempts.length);
+      note({ model: target.model, label, outcome: "failed", detail: error instanceof AIProviderError ? error.type : error instanceof Error ? error.message.slice(0, 120) : "unknown error" });
     }
   }
   return { completed: null, attempts };

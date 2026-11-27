@@ -23,6 +23,9 @@ export type SandboxOutput = {
   exitCode: number | null;
   durationMs: number;
   timedOut: boolean;
+  /** Sandbox id + region, shown in the chat transcript for traceability (Issue 7). */
+  sandboxId?: string;
+  region?: string;
 };
 export type SandboxResult =
   | { ok: true; output: SandboxOutput }
@@ -157,7 +160,7 @@ export async function runConversationSandbox(input: {
       return { ok: false, error: "COMMAND_NOT_ALLOWED", command, message: parsed.error };
     }
     if (typeof parsed.stdout !== "string" || typeof parsed.stderr !== "string" || !(typeof parsed.exitCode === "number" || parsed.exitCode === null)) throw new Error("SANDBOX_INVALID_RESPONSE");
-    const output: SandboxOutput = { command: cleanOutput(command, creds.apiKey), stdout: cleanOutput(parsed.stdout, creds.apiKey), stderr: cleanOutput(parsed.stderr, creds.apiKey), exitCode: parsed.exitCode, timedOut: parsed.timedOut === true, durationMs: Math.max(1, Date.now() - started) };
+    const output: SandboxOutput = { command: cleanOutput(command, creds.apiKey), stdout: cleanOutput(parsed.stdout, creds.apiKey), stderr: cleanOutput(parsed.stderr, creds.apiKey), exitCode: parsed.exitCode, timedOut: parsed.timedOut === true, durationMs: Math.max(1, Date.now() - started), sandboxId: sandboxId ?? undefined, region: creds.target ?? undefined };
     await agentOpsHandle({ type: "step.done", executionId, agentId: traceId, stepId, status: output.timedOut || output.exitCode !== 0 ? "failed" : "done", model: sandboxId ?? "sandbox", attempts: [], durationMs: output.durationMs, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, detail: `Sandbox ${sandboxId}; exit ${output.exitCode ?? "timeout"}; command ${traceCommand}`, finishedAt: Date.now() });
     return { ok: true, output };
   } catch {

@@ -6,7 +6,12 @@ export function requestsSandboxExecution(message: string): boolean {
   // pipeline unless it explicitly asks for terminal/sandbox execution.
   if (/\b(?:build|create|develop|fix|modify)\b[^\n]{0,100}\b(?:website|project|app|application)\b/i.test(text) && !/\b(?:sandbox|terminal|command|shell)\b/i.test(text)) return false;
   if (/^(?:echo|pwd|whoami|ls|cat|stat|grep|sleep|js|npm|node|python3?|git|curl)(?:\s|$)/i.test(text)) return true;
-  return /\b(?:run|execute|test)\b/i.test(text) && /\b(?:command|sandbox|terminal|shell|script|program|code|tests)\b/i.test(text);
+  // Issue 7: a conversational run request — "run anything on your terminal",
+  // "run it in your device", "try something in your sandbox", "use daytona" —
+  // must reach the execution tool. We no longer require a literal command; the
+  // tool/route decides what to run (or offers chips), so the assistant never
+  // answers with a canned "send the exact command" refusal.
+  return /\b(?:run|execute|test|try|check|show|use)\b/i.test(text) && /\b(?:command|sandbox|terminal|shell|script|program|code|tests|device|daytona|container|your (?:machine|env|environment))\b/i.test(text);
 }
 
 /** A literal command after a colon, code fence or as the entire message. */

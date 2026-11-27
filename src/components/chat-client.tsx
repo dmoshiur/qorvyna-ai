@@ -1655,6 +1655,7 @@ export function ChatClient({
           duration_ms?: number;
           theme_gallery?: boolean;
           sandbox_output?: MessageMetadata["sandbox_output"];
+          sandbox_suggestions?: string[];
           sandbox_agent_command?: string;
           storage_degraded?: boolean;
           image?: { data_url?: string };
@@ -1698,6 +1699,7 @@ export function ChatClient({
           if (typeof data.duration_ms === "number") streamMetadata.duration_ms = data.duration_ms;
           streamMetadata.action = data.theme_gallery ? "theme_gallery" : undefined;
           streamMetadata.sandbox_output = data.sandbox_output;
+          streamMetadata.sandbox_suggestions = data.sandbox_suggestions;
           streamMetadata.sandbox_agent_command = data.sandbox_agent_command;
           commit(data.reply);
           maybeAutoSpeak(data.reply);
@@ -3038,12 +3040,30 @@ export function ChatClient({
             onCopyVersion={copyMessage}
             onRunWithAgent={isLatest && !isTemporary ? runLatestRequestWithAgent : undefined}
           />
-          {message.metadata?.sandbox_output ? <div className="mt-3 rounded-xl border border-border bg-surface-2 p-3 text-xs" aria-label="Live sandbox output">
-            <p className="mb-2 font-semibold text-ink">Live sandbox output · exit {message.metadata.sandbox_output.exitCode ?? "timeout"}</p>
-            <p className="font-mono text-ink-3">$ {message.metadata.sandbox_output.command}</p>
-            <p className="mt-2 font-semibold text-ink-3">stdout</p><pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-ink">{message.metadata.sandbox_output.stdout || "(empty)"}</pre>
-            <p className="mt-2 font-semibold text-ink-3">stderr</p><pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-ink">{message.metadata.sandbox_output.stderr || "(empty)"}</pre>
-          </div> : null}
+          {message.metadata?.sandbox_output ? (() => {
+            const so = message.metadata.sandbox_output!;
+            const exitBad = so.exitCode !== 0 && so.exitCode !== null;
+            const fullOutput = `$ ${so.command}\n\nstdout:\n${so.stdout || "(empty)"}\n\nstderr:\n${so.stderr || "(empty)"}`;
+            return <div className="mt-3 rounded-xl border border-border bg-surface-2 p-3 text-xs" aria-label="Live sandbox output">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p className={cn("font-semibold", exitBad ? "text-danger" : "text-ink")}>Live sandbox output · exit {so.exitCode ?? "timeout"}{so.timedOut ? " (timed out)" : ""}</p>
+                <button type="button" className="rounded-md border border-border px-2 py-0.5 text-[11px] text-ink-2 hover:bg-surface" onClick={() => { void navigator.clipboard?.writeText(fullOutput); }}>Copy output</button>
+              </div>
+              <p className="font-mono text-ink-3">$ {so.command}</p>
+              {(so.sandboxId || so.region) && (
+                <p className="mt-1 font-mono text-[11px] text-ink-3">sandbox {so.sandboxId ?? "—"}{so.region ? ` · ${so.region}` : ""}{so.durationMs ? ` · ${so.durationMs}ms` : ""}</p>
+              )}
+              <p className="mt-2 font-semibold text-ink-3">stdout</p><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-ink">{so.stdout || "(empty)"}</pre>
+              <p className="mt-2 font-semibold text-ink-3">stderr</p><pre className={cn("max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono", so.stderr ? "text-amber-500" : "text-ink")}>{so.stderr || "(empty)"}</pre>
+              {message.metadata?.sandbox_suggestions?.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {message.metadata.sandbox_suggestions.map((chip) => (
+                    <button key={chip} type="button" className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-ink-2 hover:border-accent hover:text-accent" onClick={() => { setInput(chip); }}>{chip}</button>
+                  ))}
+                </div>
+              ) : null}
+            </div>;
+          })() : null}
           {message.metadata?.sandbox_agent_command ? <div className="mt-3 rounded-xl border border-border bg-surface-2 p-3 text-sm">
             <button type="button" className="font-semibold text-accent" onClick={() => { switchMode("agent"); setInput(`Run this command in your sandbox: ${message.metadata?.sandbox_agent_command ?? ""}`); }}>Run this in Agent mode →</button>
           </div> : null}

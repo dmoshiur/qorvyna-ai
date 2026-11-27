@@ -39,7 +39,9 @@ export type MessageMetadata = {
   audio_waveform?: number[];
   audio_language?: string | null;
   action?: string;
-  sandbox_output?: { command: string; stdout: string; stderr: string; exitCode: number | null; durationMs: number; timedOut: boolean };
+  sandbox_output?: { command: string; stdout: string; stderr: string; exitCode: number | null; durationMs: number; timedOut: boolean; sandboxId?: string; region?: string };
+  /** Quick-check command chips offered when a conversational run request had no literal command (Issue 7). */
+  sandbox_suggestions?: string[];
   sandbox_agent_command?: string;
   project_id?: string;
   image_data_url?: string;

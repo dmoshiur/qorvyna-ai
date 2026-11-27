@@ -836,9 +836,14 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
   // executed directly (never rewritten by a model); otherwise ask the model to
   // select run_command. We render only the tool result, not model narration.
   if (sandboxIntent) {
-    let command = explicitSandboxCommand(message);
+    const explicitCommand = explicitSandboxCommand(message);
+    let command = explicitCommand;
     let cwd: string | undefined;
     let timeoutMs: number | undefined;
+    // Issue 7: safe quick-check commands offered as chips when the user asked to
+    // run "something" without naming a literal command. The assistant still runs
+    // a real command (never the canned "send the exact command" refusal).
+    const sandboxSuggestions = ["echo hello", "uname -a", "node -v", "ls -la"];
     if (!command && targets[0]?.client.supportsToolCalls) {
       try {
         const daytonaKey = (await resolveDaytonaCredentials())?.apiKey;
@@ -861,8 +866,12 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
             if (typeof obj.timeout_ms === "number" && Number.isFinite(obj.timeout_ms)) timeoutMs = obj.timeout_ms;
           }
         }
-      } catch { /* no selected command: report honestly below */ }
+      } catch { /* no selected command: fall back to a safe default below */ }
     }
+    // Issue 7: a conversational run request with no literal command must still
+    // produce real sandbox output. Run a sensible, safe default command so the
+    // user sees a live result, and offer chips for other quick checks.
+    if (!command) command = sandboxSuggestions[1];
     let result: SandboxResult | null = null;
     if (command && !containsCredentials(command)) {
       // This dedicated flow is enabled only by an explicit execution request;
@@ -896,7 +905,10 @@ async function handleChat(d: Db, user: SessionUser, body: Record<string, unknown
     await agentOpsHandle({ type: "execution.end", executionId: agentOpsExecId, status: result?.ok ? "completed" : "failed", outcome: result?.ok ? "success" : "tool_failure", endedAt: Date.now(), totalDurationMs: Math.max(1, Date.now() - started) });
     return json({ reply, conversation_id: convId, mode, ...(targets[0] ? { model: targets[0].model, provider: targets[0].provider } : {}),
       ...(stored.messageId ? { message_id: stored.messageId } : {}), ...(userMessageId ? { user_message_id: userMessageId } : {}),
-      ...(sandboxOutput ? { sandbox_output: sandboxOutput } : {}), ...(sandboxAgentCommand ? { sandbox_agent_command: sandboxAgentCommand } : {}) }, 200, requestId);
+      ...(sandboxOutput ? { sandbox_output: sandboxOutput } : {}), ...(sandboxAgentCommand ? { sandbox_agent_command: sandboxAgentCommand } : {}),
+      // Chips for the user to re-run a different quick check (Issue 7). Omitted
+      // when they already typed an explicit command.
+      ...(explicitCommand ? {} : { sandbox_suggestions: sandboxSuggestions }) }, 200, requestId);
   }
 
   // --- Provider streaming path (Chat and Agent) --------------------------------
