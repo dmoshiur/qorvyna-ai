@@ -58,11 +58,14 @@ export const PROVIDERS: Record<ProviderType, ProviderInfo> = {
     label: "Google (Gemini)",
     description: "Google Generative Language API — Gemini models.",
     defaultBaseUrl: "https://generativelanguage.googleapis.com",
-    // Google switched Gemini API keys from the legacy "Standard key" (AIza…,
-    // 39 chars) to a new "Auth key" (AQ.Ab…, 53 chars) starting 2026-05-28.
-    // New AI Studio keys default to the AQ.Ab format, so both must be accepted.
-    keyPattern: /^(?:AIza[0-9A-Za-z_-]{35}|AQ\.Ab[A-Za-z0-9_-]{40,56})$/,
-    keyHint: "Starts with AIza (legacy) or AQ.Ab (new Gemini auth key)",
+    // Google has two live Gemini API key formats and BOTH are valid:
+    //   • legacy "Standard key": AIza + 35 key characters (39 total)
+    //   • new "Auth key":        AQ. + key characters (length varies; new
+    //     AI Studio keys default to it). A key must never be rejected because
+    //     of its prefix — validation is a shape check only, and the key is
+    //     stored and sent byte-for-byte exactly as entered.
+    keyPattern: /^(?:AIza[0-9A-Za-z_-]{35}|AQ\.[A-Za-z0-9_.-]{30,120})$/,
+    keyHint: "Starts with AIza (legacy) or AQ. (new Gemini auth key)",
     baseUrlRequired: false,
   },
   openai_compatible: {

@@ -33,9 +33,16 @@ type Account = {
   available_at: string | null; last_error: string | null; last_error_at: string | null; last_ok_at: string | null;
   requests_last_minute: number; tokens_last_minute: number; requests_total: number; rotations_away: number; models: ModelWindow[];
 };
-type Stored = { doc_id: string; id: string; label: string; provider: ProviderType; provider_label: string; base_url: string; enabled: boolean; key_hint: string; created_at: string | null; readable: boolean };
+type Stored = {
+  doc_id: string; id: string; label: string; provider: ProviderType; provider_label: string; base_url: string; enabled: boolean; key_hint: string; created_at: string | null; readable: boolean;
+  last_test_at: string | null; last_test_ok: boolean | null; last_test_status: number | null; last_test_category: string | null;
+  last_test_detail: string | null; last_test_model: string | null; last_test_latency_ms: number | null; last_ok_at: string | null;
+};
 type StoredModel = { model_id: string; label: string; account_id: string; provider: ProviderType; provider_label: string; context_tokens: number | null; enabled: boolean; created_at: string | null };
-type ProbeResult = { ok: boolean; models: string[]; error: string | null; status: number | null };
+type ProbeResult = {
+  ok: boolean; models: string[]; error: string | null; status: number | null;
+  category: string | null; verified: boolean; detail: string | null; model_used: string | null; latency_ms: number | null; checked_at?: string;
+};
 type Payload = { accounts: Account[]; stored: Stored[]; models: Record<string, StoredModel[]>; can_store: boolean };
 
 const STATE_COPY: Record<Account["state"], { label: string; tone: string }> = {
@@ -45,6 +52,34 @@ const STATE_COPY: Record<Account["state"], { label: string; tone: string }> = {
   invalid: { label: "Key rejected", tone: "border-danger/40 bg-danger-soft text-danger" },
   disabled: { label: "Disabled", tone: "border-border bg-surface-2 text-ink-3" },
 };
+
+/**
+ * Configured ≠ Verified ≠ Available.
+ *   Configured  credentials are saved (encrypted) — proves nothing about auth.
+ *   Verified    the provider accepted a real authenticated request.
+ *   Available   runtime rotation currently considers the account usable.
+ * The verification badge comes from the last real test; "Ready" (runtime) is
+ * never shown as proof that a key works.
+ */
+const CATEGORY_LABEL: Record<string, { label: string; tone: string }> = {
+  authentication: { label: "Rejected", tone: "border-danger/40 bg-danger-soft text-danger" },
+  permission: { label: "Permission denied", tone: "border-danger/40 bg-danger-soft text-danger" },
+  model_not_found: { label: "Model not found", tone: "border-danger/40 bg-danger-soft text-danger" },
+  invalid_request: { label: "Invalid request", tone: "border-danger/40 bg-danger-soft text-danger" },
+  rate_limit: { label: "Rate limited", tone: "border-warning/30 bg-warning-soft text-warning" },
+  quota: { label: "Quota exceeded", tone: "border-warning/30 bg-warning-soft text-warning" },
+  provider_unavailable: { label: "Unavailable", tone: "border-warning/30 bg-warning-soft text-warning" },
+  timeout: { label: "Timed out", tone: "border-warning/30 bg-warning-soft text-warning" },
+  network: { label: "Unreachable", tone: "border-warning/30 bg-warning-soft text-warning" },
+  unknown: { label: "Test failed", tone: "border-danger/40 bg-danger-soft text-danger" },
+};
+
+function verificationBadge(stored: Stored | undefined): { label: string; tone: string } | null {
+  if (!stored) return null;
+  if (stored.last_test_at === null || stored.last_test_ok === null) return { label: "Not verified", tone: "border-border bg-surface-2 text-ink-3" };
+  if (stored.last_test_ok) return { label: "Verified", tone: "border-success/30 bg-success-soft text-success" };
+  return CATEGORY_LABEL[stored.last_test_category ?? "unknown"] ?? CATEGORY_LABEL.unknown;
+}
 
 const PROVIDER_TONE: Record<string, string> = {
   groq: "border-sky-500/30 bg-sky-500/10 text-sky-700",
@@ -141,6 +176,9 @@ export function ProviderAccounts() {
     try {
       const result = await rpc<ProbeResult>(action, payload);
       setProbeResults((current) => ({ ...current, [id]: result }));
+      // The backend persists the verification outcome; refresh so the badges
+      // (Verified / Rejected / Unavailable, last test time) reflect it.
+      await load();
     } catch (cause) {
       setError(ERRORS[errorCodeOf(cause)] ?? "That check could not be completed.");
     } finally {
@@ -172,16 +210,31 @@ export function ProviderAccounts() {
           <ul className="mt-4 grid gap-3">
             {accounts.map((account) => {
               const storedAccount = storedById.get(account.id);
-              const copy = STATE_COPY[account.state];
               const isGroq = account.provider === "groq";
               const probe = probeResults[`probe-${account.id}`];
+              const testing = busy === account.id && probe === null;
+              // A green runtime badge is only honest when the most recent real
+              // test did not fail. "Ready" never means "the key was verified".
+              const lastTestFailed = storedAccount ? storedAccount.last_test_ok === false : false;
+              const runtimeState = !account.enabled
+                ? STATE_COPY.disabled
+                : lastTestFailed && account.state === "ready"
+                  ? { label: "Test failed", tone: "border-danger/40 bg-danger-soft text-danger" }
+                  : STATE_COPY[account.state];
+              const verification = verificationBadge(storedAccount);
               return (
                 <li key={account.id} className="rounded-xl border border-border bg-surface p-3">
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
                     <span className={cn("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold", PROVIDER_TONE[account.provider] ?? "border-border bg-surface-2 text-ink-3")}>{account.provider_label}</span>
                     <span className="min-w-0 truncate text-[13px] font-semibold text-ink">{account.label}</span>
                     <span className="font-mono text-[11px] text-ink-3">{account.key_hint}</span>
-                    <span className={cn("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold", copy.tone)}>{copy.label}</span>
+                    <span className="rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10.5px] font-semibold text-ink-2">Configured</span>
+                    {verification ? <span className={cn("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold", verification.tone)}>{verification.label}</span> : null}
+                    {testing ? (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-warning/30 bg-warning-soft px-2 py-0.5 text-[10.5px] font-semibold text-warning"><Spinner className="h-3 w-3" /> Testing…</span>
+                    ) : isGroq || !account.enabled ? (
+                      <span className={cn("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold", runtimeState.tone)}>{runtimeState.label}</span>
+                    ) : null}
                     <span className="text-[11px] text-ink-3">{account.source === "env" ? "Environment" : "Added here"}</span>
                     {account.source === "admin" ? (
                       <span className="ml-auto flex flex-wrap gap-1.5">
@@ -202,6 +255,14 @@ export function ProviderAccounts() {
                       <span className="font-mono truncate">Base: <span className="text-ink-2">{account.base_url}</span></span>
                       {account.last_error ? <span className="text-warning">{account.last_error}</span> : null}
                     </div>
+                  ) : null}
+                  {storedAccount ? (
+                    <dl className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11.5px] sm:grid-cols-4">
+                      <div><dt className="text-ink-3">Last test</dt><dd className="font-mono tabular-nums text-ink">{storedAccount.last_test_at ? <TimeOfDayText value={storedAccount.last_test_at} /> : "never"}</dd></div>
+                      <div><dt className="text-ink-3">Last successful request</dt><dd className="font-mono tabular-nums text-ink">{storedAccount.last_ok_at ? <TimeOfDayText value={storedAccount.last_ok_at} /> : "—"}</dd></div>
+                      <div><dt className="text-ink-3">Last error category</dt><dd className="text-ink">{storedAccount.last_test_ok === false ? (CATEGORY_LABEL[storedAccount.last_test_category ?? "unknown"]?.label ?? "Unknown") : "none"}</dd></div>
+                      <div><dt className="text-ink-3">Verification model</dt><dd className="truncate font-mono text-ink">{storedAccount.last_test_model ?? "—"}</dd></div>
+                    </dl>
                   ) : null}
                   {probe ? (
                     <ProbeOutcome result={probe} />
@@ -365,16 +426,26 @@ export function ProviderAccounts() {
 }
 
 function ProbeOutcome({ result }: { result: ProbeResult }) {
+  const checkedAt = result.checked_at ? <TimeOfDayText value={result.checked_at} /> : null;
   if (result.ok) {
     return (
       <div className="mt-2.5 rounded-lg border border-success/30 bg-success-soft px-3 py-2 text-[11.5px] text-success">
-        Connected — the provider reports {result.models.length} model{result.models.length === 1 ? "" : "s"} for this key.
+        <p className="font-semibold">Verified — the provider accepted the authenticated request{checkedAt ? <> at {checkedAt}</> : null}.</p>
+        <p className="mt-0.5">
+          {result.model_used ? <>Model checked: <span className="font-mono">{result.model_used}</span>. </> : null}
+          The provider reports {result.models.length} model{result.models.length === 1 ? "" : "s"} for this key{result.latency_ms ? ` (${result.latency_ms} ms)` : ""}.
+        </p>
       </div>
     );
   }
+  const category = result.category ? (CATEGORY_LABEL[result.category] ?? CATEGORY_LABEL.unknown).label : null;
   return (
     <div className="mt-2.5 rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] text-danger">
-      {result.error ?? "The provider could not be reached."}
+      <p className="font-semibold">
+        Not verified{category ? ` — ${category}` : ""}{result.status ? ` (HTTP ${result.status})` : ""}{checkedAt ? <> · {checkedAt}</> : null}
+      </p>
+      <p className="mt-0.5 break-words">{result.error ?? result.detail ?? "The provider could not be reached."}</p>
+      {result.model_used ? <p className="mt-0.5 text-[11px] text-ink-3">Verification model: <span className="font-mono">{result.model_used}</span></p> : null}
     </div>
   );
 }
