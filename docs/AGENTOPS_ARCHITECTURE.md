@@ -17,7 +17,7 @@ QORVYNA AI's AgentOps layer instruments live AI orchestrations (`src/app/api/ai/
   - Rejects attempts to modify protected namespaces (`system.*`, `prompt.*`, `credentials.*`, `auth.*`, `token.*`, `secret.*`, `rbac.*`, `admin.*`) and writes immutable governance audit records.
 - **OpenTelemetry-Compatible Observability (`src/lib/agentops/telemetry.ts`)**:
   - Emits W3C-compatible 128-bit `traceId` and 64-bit `spanId` hierarchies (`agent.execution`, `gen_ai.chat`, `agent.tool.*`, `agent.fallback`) and exports OTLP/JSON (`resourceSpans` / `scopeSpans`) via `GET /api/agentops/telemetry?format=otlp`.
-  - Scrubs bearer tokens, API keys (`gsk_`, `sk-`, `ghp_`, `github_pat_`, `AIza`), private keys, and optionally emails before persistence or export.
+  - Scrubs bearer tokens, API keys (`gsk_`, `sk-`, `ghp_`, `github_pat_`, `AIza`, `AQ.Ab` Gemini auth keys), private keys, and optionally emails before persistence or export.
   - Supports configurable sampling/overhead and bounded retention pruning (`pruneRetention`) wired into `/api/jobs/maintenance`.
 - **Agent Evaluation & Token Economics (`src/lib/agentops/evaluation.ts`)**:
   - Computes task success/failure/circuit-trip rates, P50/P95 latency, per-model/provider token usage, tool reliability, and reproducible benchmark runs (`POST /api/agentops/evaluations`).
