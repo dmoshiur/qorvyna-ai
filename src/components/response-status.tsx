@@ -186,6 +186,11 @@ export function ResponseProgress({
  * Compact, collapsed-by-default Arena-style summary pill shown above an
  * assistant reply when real server execution steps were recorded.
  */
+/** Steps that are routing/metadata, not real work (excluded from the count). */
+function isRoutingOnlyStep(step: WorkingStep): boolean {
+  return /^(Using |Deep reasoning)/i.test(step.label);
+}
+
 export function CompactStepsPill({
   steps,
   durationMs,
@@ -200,12 +205,14 @@ export function CompactStepsPill({
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
-  if (!steps || steps.length === 0) return null;
+  // The count must reflect real work; a routing step alone is not "worked".
+  const workSteps = (steps ?? []).filter((step) => !isRoutingOnlyStep(step));
+  if (workSteps.length === 0) return null;
 
-  const failed = steps.some((s) => s.status === "failed");
+  const failed = workSteps.some((s) => s.status === "failed");
   const totalMs = typeof durationMs === "number" && durationMs > 0
     ? durationMs
-    : steps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
+    : workSteps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
   const badge = displayModelBadge(model, provider, null);
 
   return (
@@ -222,7 +229,7 @@ export function CompactStepsPill({
           <Check size={11} className="shrink-0 text-success" aria-hidden="true" />
         )}
         <span className="truncate font-medium text-ink-2">
-          Worked · {steps.length} {steps.length === 1 ? "step" : "steps"}
+          Worked · {workSteps.length} {workSteps.length === 1 ? "step" : "steps"}
         </span>
         {totalMs > 0 ? (
           <span className="shrink-0 font-mono text-[10px] tabular-nums text-ink-3">
@@ -240,7 +247,7 @@ export function CompactStepsPill({
           aria-hidden="true"
         />
       </button>
-      {open ? <StepTimeline steps={steps} /> : null}
+      {open ? <StepTimeline steps={workSteps} /> : null}
     </div>
   );
 }

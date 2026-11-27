@@ -23,6 +23,7 @@
 import { requestsSandboxExecution } from "@/lib/ai/sandbox-intent";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   ArrowDown, BookOpen, Braces, BrainCircuit, Code2, Copy, Download, ExternalLink, FileDown, FileSearch, Flag, FolderPlus, GraduationCap,
   Image as ImageIcon, Layers, Lightbulb, Lock, MonitorPlay, Pencil, Play, RefreshCcw, RotateCcw, Share2, ShieldAlert, Sparkles,
@@ -32,7 +33,9 @@ import {
   primeSpeech, readAutoSpeakPreference, speakMarkdown, speechTextFromMarkdown, stopSpeech, writeAutoSpeakPreference,
 } from "@/lib/chat-speech";
 import { fbAuth, firebaseBrowserConfigured, waitForAuthUser } from "@/lib/firebase/client";
-import { mintSessionCookie, optionalAuthHeaders, rpc } from "@/lib/client/api";
+import { mintSessionCookie, optionalAuthHeaders, rpc, RpcCallError } from "@/lib/client/api";
+import { findRepoUrl } from "@/lib/repo-url";
+import { dedupeProjectChoices, formatProjectUpdated, type ProjectChoice } from "@/lib/projects/choices";
 import { useAuthLifecycle } from "@/components/auth/auth-provider";
 import { startAuthLifecycle } from "@/lib/auth/lifecycle";
 import { logAuthEvent } from "@/lib/auth/diagnostics";
@@ -98,7 +101,7 @@ import { ResponseProgress } from "@/components/response-status";
 import { ModeQuickActions, LiveTaskGraph, type GraphNode } from "@/components/mode-workspace";
 import { cancelsPendingTask, classifyAgentOutput, isClarificationAnswer, isTaskInterruption, requestsClarificationFirst, resumedTaskPrompt, pendingTaskFromMessages, type PendingAgentTask } from "@/lib/ai/agent-execution";
 import { reportSuccessfulAiResponse } from "@/components/ai-status";
-import { NO_BUILD_INTENT, buildActionsFor, detectBuildIntent, detectImageAssetRequest, shouldRunBuildPipeline, type BuildIntent } from "@/lib/ai/build-intent";
+import { NO_BUILD_INTENT, buildActionsFor, detectBuildIntent, detectImageAssetRequest, shouldRunBuildPipeline, wantsProjectContext, type BuildIntent } from "@/lib/ai/build-intent";
 import { agentHandoffReason, approvedIntent, isConversationMode, mayExecuteAgent, shouldCreateCodeWorkspace, type HandoffReason } from "@/lib/ai/execution-policy";
 import { outcomeOfRequestError, outcomeOfRun } from "@/lib/ai/task-outcome";
 import { ExecutionHandoff } from "@/components/build/execution-handoff";
@@ -369,7 +372,14 @@ export function ChatClient({
   const [agentFiles, setAgentFiles] = useState<AgentFile[]>(latestArtifacts(initialMessages));
   const [agentProjectId, setAgentProjectId] = useState<string | null>(initialProjectId ?? (initialConvId ? null : latestProjectId(initialMessages)));
   const explicitAgentProjectIdRef = useRef<string | null>(null);
-  const [projectChoices, setProjectChoices] = useState<Array<{ id: string; title: string }>>([]);
+  const [projectChoices, setProjectChoices] = useState<ProjectChoice[]>([]);
+  // Why the picker is open: "blocked" means the request could not start without
+  // a project; "choose" means the run is waiting on a project choice.
+  const [pickerReason, setPickerReason] = useState<"blocked" | "choose" | null>(null);
+  /** A repo URL from the blocked message — offered as the first way forward. */
+  const [pendingRepoUrl, setPendingRepoUrl] = useState<string | null>(null);
+  /** True while a pending repo is being imported into a new project. */
+  const [importingRepo, setImportingRepo] = useState(false);
   /** Scope template for the "Prepare a GitHub change" preset (per chosen project). */
   const githubChangeTemplateRef = useRef<((title: string) => string) | null>(null);
   /** Show the Connect GitHub panel before a push when GitHub is not connected. */
@@ -2183,6 +2193,17 @@ export function ChatClient({
       setGithubCreateRepoOpen(true);
       setGithubPanelOpen(true);
     }
+    if (!isTemporary && !agentProjectId && agentFiles.length === 0 && pending.length === 0 && wantsProjectContext(rawMessage)) {
+      // Issue 6: a context-seeking message ("help me fix my project") gets the
+      // picker in the first reply instead of an answer about an unknown project.
+      const contextProjects = await rpc<ProjectChoice[]>("project_list").catch(() => [] as ProjectChoice[]);
+      if (contextProjects.length > 0) {
+        setProjectChoices(dedupeProjectChoices(contextProjects));
+        setPickerReason("choose");
+        setNotice("Tell me which project to work on — pick one below, or import a repo as a new project.");
+        return;
+      }
+    }
     await streamMessage(message, { attachments: pending, imageStoragePath: attachedImage?.storagePath ?? null, intent, turnId, audioAssetId, ...flow });
   }
 
@@ -2211,9 +2232,9 @@ export function ChatClient({
     githubChangeTemplateRef.current = null;
     setGithubPanelOpen(false);
     switchMode("agent");
-    let projects: Array<{ id: string; title: string }>;
+    let projects: ProjectChoice[];
     try {
-      projects = await rpc<Array<{ id: string; title: string }>>("project_list");
+      projects = await rpc<ProjectChoice[]>("project_list");
     } catch {
       setNotice("Projects could not be loaded. Try again before choosing a project or starting a new build.");
       return;
@@ -2240,9 +2261,45 @@ export function ChatClient({
       clarification: null,
       signals: ["Prepare a GitHub change preset"],
     };
-    setProjectChoices(projects);
+    setProjectChoices(dedupeProjectChoices(projects));
+    setPickerReason("choose");
     setGithubPanelOpen(true);
     setNotice("Choose the project to change. I'll prepare a focused, production-ready change scoped to it.");
+  }
+
+  /**
+   * Issue 6: a blocked PROJECT_CONTEXT_MISSING request that names a repo URL
+   * must offer "Import this repo as a new project" before the project picker.
+   * The guard itself stays — this only adds a useful way past the wall.
+   */
+  async function importPendingRepoAsProject() {
+    const repoUrl = pendingRepoUrl;
+    if (!repoUrl || importingRepo) return;
+    setImportingRepo(true);
+    setNotice(null);
+    setFailure(null);
+    setProjectChoices([]);
+    setPendingRepoUrl(null);
+    try {
+      const result = await rpc<{ projectId: string; title: string; fileCount: number }>("project_import_repo", {
+        repo_url: repoUrl,
+        ...(convIdRef.current ? { conversation_id: convIdRef.current } : {}),
+      });
+      setNotice(`Imported ${result.fileCount} file(s) into ${result.title}. Opening the project workspace.`);
+      window.location.assign(`/projects/${result.projectId}`);
+    } catch (err) {
+      const code = err instanceof RpcCallError ? err.code : "REPO_IMPORT_FAILED";
+      const detail = err instanceof RpcCallError ? (err.detail ?? err.code) : "The repository could not be imported. Try again.";
+      setPendingRepoUrl(repoUrl);
+      if (code === "GITHUB_NOT_CONNECTED") {
+        setGithubPanelOpen(true);
+        setNotice(`${detail} Connect GitHub, then choose Import this repo as a new project again.`);
+      } else {
+        setNotice(detail);
+      }
+    } finally {
+      setImportingRepo(false);
+    }
   }
 
   /**
@@ -2283,6 +2340,7 @@ export function ChatClient({
     const startedAt = Date.now();
     setFailure(null);
     setProjectChoices([]);
+    setPickerReason(null);
     setNotice(null);
     setStreaming(true);
     setStreamStatus("processing");
@@ -2460,8 +2518,10 @@ export function ChatClient({
       if (stopCode === "PROJECT_AMBIGUOUS" || stopCode === "PROJECT_CONTEXT_MISSING") {
         // The owner-scoped list includes every selectable project, including
         // candidates beyond the short diagnostic stored in a build run.
-        void rpc<Array<{ id: string; title: string }>>("project_list")
-          .then(setProjectChoices).catch(() => setProjectChoices([]));
+        void rpc<ProjectChoice[]>("project_list")
+          .then((list) => { setPickerReason("blocked"); setProjectChoices(dedupeProjectChoices(list)); }).catch(() => setProjectChoices([]));
+        const repo = findRepoUrl(message);
+        setPendingRepoUrl(repo ? repo.cloneUrl : null);
       }
       // Blocked is not failed: the same request would hit the same wall, so
       // the wall and what removes it are named instead of offering a retry.
@@ -3235,16 +3295,44 @@ export function ChatClient({
                 onDismiss={dismissHandoff}
               />
             ) : null}
+            {pendingRepoUrl ? (
+              <div className="mb-2 rounded-xl border border-accent/40 bg-accent-soft p-4" role="group" aria-label="Import the repository as a new project">
+                <p className="mb-1.5 text-sm font-medium text-ink">This request names a repository.</p>
+                <p className="mb-3 break-all font-mono text-[11.5px] text-ink-2">{pendingRepoUrl}</p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void importPendingRepoAsProject()}
+                    disabled={importingRepo}
+                    className="inline-flex min-h-9 items-center rounded-lg bg-accent-solid px-3 text-[12.5px] font-semibold text-accent-ink hover:bg-accent-solid-hover disabled:opacity-50"
+                  >
+                    {importingRepo ? "Importing…" : "Import this repo as a new project"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingRepoUrl(null)}
+                    className="inline-flex min-h-9 items-center rounded-lg border border-border px-3 text-[12.5px] font-medium text-ink-2 hover:text-ink"
+                  >
+                    Choose an existing project instead
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {projectChoices.length ? (
               <div className="rounded-xl border border-border bg-surface p-4" role="group" aria-label="Choose project to edit">
-                <p className="mb-2 text-sm font-medium text-ink">Which project should QORVYNA edit?</p>
+                <p className="mb-2 text-sm font-medium text-ink">
+                  {pickerReason === "blocked"
+                    ? "QORVYNA could not start without a project — which one should it work on?"
+                    : "Which project should QORVYNA edit?"}
+                </p>
                 <div className="flex flex-wrap gap-2">
-                  {projectChoices.map((choice) => (
-                    <button key={choice.id} type="button" className="min-h-11 rounded-lg border border-border px-3 text-sm text-ink hover:bg-surface-2"
+                  {projectChoices.slice(0, 8).map((choice) => (
+                    <button key={choice.id} type="button" className="min-h-11 w-full rounded-lg border border-border px-3 text-left hover:bg-surface-2"
                       onClick={() => {
                         explicitAgentProjectIdRef.current = choice.id;
                         setAgentProjectId(choice.id);
                         setProjectChoices([]);
+                        setPickerReason(null);
                         // The request that was blocked on this choice runs now.
                         const template = githubChangeTemplateRef.current;
                         githubChangeTemplateRef.current = null;
@@ -3260,10 +3348,19 @@ export function ChatClient({
                           setNotice(`Selected ${choice.title}. Write what to change and it will run on this project.`);
                         }
                       }}>
-                      {choice.title} · {choice.id.slice(0, 8)}
+                      <span className="block truncate text-sm font-medium text-ink">{choice.title}</span>
+                      <span className="mt-0.5 block text-[11px] text-ink-3">
+                        {choice.stack} · {choice.file_count} file{choice.file_count === 1 ? "" : "s"} · {formatProjectUpdated(choice.updated_at) || "updated recently"}
+                      </span>
                     </button>
                   ))}
                 </div>
+                {projectChoices.length > 8 ? (
+                  <p className="mt-2 text-[11.5px] text-ink-3">
+                    Showing 8 of {projectChoices.length} ·{" "}
+                    <Link href="/projects" className="font-medium text-accent hover:underline">Show all in Workspace</Link>
+                  </p>
+                ) : null}
               </div>
             ) : null}
             {githubPanelOpen ? (

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { db, getCurrentUser } from "@/lib/data";
 import { listProjects } from "@/lib/server/projects";
 import { EmptyState } from "@/components/ui";
+import { ImportRepoButton } from "@/components/projects/import-repo-button";
 import { FolderKanban } from "lucide-react";
 
 export const metadata: Metadata = { title: "Projects" };
@@ -15,10 +16,13 @@ export default async function ProjectsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <p className="eyebrow mb-1.5">Workspace</p>
-        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink sm:text-3xl">Projects</h1>
-        <p className="mt-1 text-sm text-ink-2">Agent-built sites, saved files, live previews and published URLs.</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="eyebrow mb-1.5">Workspace</p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink sm:text-3xl">Projects</h1>
+          <p className="mt-1 text-sm text-ink-2">Agent-built sites, saved files, live previews and published URLs.</p>
+        </div>
+        <ImportRepoButton />
       </div>
       {projects.length === 0 ? (
         <EmptyState

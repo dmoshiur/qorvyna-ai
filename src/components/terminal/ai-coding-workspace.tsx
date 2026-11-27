@@ -21,6 +21,7 @@ import {
 import { Alert, Badge, Button, Card } from "@/components/ui";
 import { DaytonaSandboxPanel } from "@/components/daytona-connection";
 import { GithubConnection } from "@/components/github-connection";
+import { ImportRepoButton } from "@/components/projects/import-repo-button";
 
 interface WorkspaceProjectSummary {
   id: string;
@@ -402,6 +403,7 @@ export function AiCodingWorkspace() {
             <FolderPlus className="mr-1.5 h-3.5 w-3.5" />
             New Project
           </Button>
+          <ImportRepoButton className="!min-h-11 !px-3 !py-1.5 !text-xs" />
           <Link
             href="/agentops"
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--bg-subtle)]"

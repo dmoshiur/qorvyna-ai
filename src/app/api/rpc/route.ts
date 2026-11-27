@@ -23,6 +23,7 @@ import * as appUpdates from "@/lib/server/app-updates";
 import { getConversationHistoryPage } from "@/lib/server/queries";
 import * as chatMessages from "@/lib/server/chat-messages";
 import * as projects from "@/lib/server/projects";
+import { importRepoToProject } from "@/lib/server/repo-import";
 import * as deploy from "@/lib/server/deploy";
 import * as design from "@/lib/server/design";
 import * as family from "@/lib/server/family";
@@ -696,6 +697,13 @@ const ACTIONS: Record<string, Handler> = {
   project_assets: (d, u, b) => projects.listProjectAssets(d, u, z.string().min(1).parse(b.project_id)),
   project_create_directory: (d, u, b) =>
     projects.createProjectDirectory(d, u, { project_id: z.string().min(1).parse(b.project_id), path: z.string().min(1).parse(b.path) }),
+  project_import_repo: (d, u, b) =>
+    importRepoToProject(d, u, {
+      repoUrl: str(b.repo_url),
+      targetProjectId: b.target_project_id ? str(b.target_project_id) : null,
+      title: b.title ? str(b.title) : undefined,
+      conversationId: b.conversation_id ? str(b.conversation_id) : null,
+    }),
   project_publish: (d, u, b) =>
     deploy.publishProject(d, u, {
       project_id: z.string().min(1).parse(b.project_id),
