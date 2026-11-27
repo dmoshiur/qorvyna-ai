@@ -186,6 +186,26 @@ export class AgentOpsEngine {
         }
         break;
       }
+      case "step.attempt": {
+        rec.stepAttempts.push({
+          stepId: event.stepId,
+          stage: event.stage,
+          attempt: event.attempt,
+          model: event.model,
+          label: event.label,
+          provider: event.provider,
+          outcome: event.outcome,
+          error: event.error ? scrubSecrets(event.error) : "",
+          at: event.at,
+        });
+        if (event.outcome === "failed") {
+          const d = this.guard(event.executionId).observeProviderFailure();
+          if (d.kind === "open") decision = d;
+        } else if (event.outcome === "ok") {
+          this.guard(event.executionId).observeProviderSuccess();
+        }
+        break;
+      }
       case "step.done": {
         const cleanDetail = event.detail ? scrubSecrets(event.detail) : undefined;
         const step = rec.steps.find((s) => s.stepId === event.stepId);

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Activity, Check, RefreshCw, Sparkles, X } from "lucide-react";
 import { Alert, Badge, Button, Card, Spinner } from "@/components/ui";
-import { LocalDateTimeText } from "@/components/local-time";
+import { VerifiedTimeText } from "@/components/local-time";
 import { cn } from "@/lib/utils";
 import { onModelPoolChange, saveModelPool, testModelConnection, visualStateForModel } from "@/components/model-picker";
 import { STRENGTH_LABEL, type ModelStatus, type PoolPreference } from "@/lib/ai/models/types";
@@ -50,25 +50,35 @@ export function ModelsClient({ showChatLink = true }: { showChatLink?: boolean }
   const available = data?.models.filter((model) => model.availability === "available") ?? [];
   const activeCount = pool.auto ? Math.min(available.length, data?.max_active ?? 4) : pool.enabled.filter((key) => available.some((model) => model.key === key)).length;
 
-  async function apply(next: PoolPreference, key: string) {
-    if (!data) return;
+  async function apply(next: PoolPreference, key: string): Promise<boolean> {
+    if (!data) return false;
     const previous = data.pool;
     setData({ ...data, pool: next });
     setSaving(key); setError("");
     try {
       const saved = await saveModelPool(next);
       setData((current) => (current ? { ...current, pool: saved } : current));
+      return true;
     } catch (err) {
       setData((current) => (current ? { ...current, pool: previous } : current));
       setError(SAVE_ERRORS[err instanceof Error ? err.message : ""] ?? "The change couldn't be saved. Try again.");
+      return false;
     } finally { setSaving(""); }
   }
   function toggle(key: string) {
     if (!data) return;
     const base = pool.auto ? [] : pool.enabled;
+    const enabling = !base.includes(key);
     const next = base.includes(key) ? base.filter((item) => item !== key) : [...base, key];
     if (next.length > data.max_active) { setError(`Up to ${data.max_active} models can work together on one request.`); return; }
-    void apply(next.length ? { auto: false, enabled: next } : { auto: true, enabled: [] }, key);
+    const saved = apply(next.length ? { auto: false, enabled: next } : { auto: true, enabled: [] }, key);
+    // Turning a model on verifies it live so its "Last verified" timestamp is
+    // recorded server-side immediately, not left as "Not tested yet".
+    void saved.then((ok) => {
+      if (!ok || !enabling) return;
+      const model = data.models.find((item) => item.key === key);
+      if (model) void runConnectionTest(model);
+    });
   }
 
   async function runConnectionTest(model: ModelStatus) {
@@ -210,7 +220,7 @@ export function ModelsClient({ showChatLink = true }: { showChatLink?: boolean }
                 <div><dt className="inline">Supported modes: </dt><dd className="inline text-ink-2">{model.supported_modes?.join(", ") || "chat, agent"}</dd></div>
                 <div>
                   <dt className="inline">Last verified: </dt>
-                  <dd className="inline text-ink-2">{model.last_tested_at ? <LocalDateTimeText value={model.last_tested_at} /> : "Not tested yet"}</dd>
+                  <dd className="inline text-ink-2"><VerifiedTimeText value={model.last_tested_at} /></dd>
                 </div>
                 {model.last_error ? (
                   <div className="sm:col-span-2">

@@ -12,9 +12,29 @@
 
 import type { AIMessage, AIProviderRequest, AIProviderResponse } from "@/lib/ai/groq";
 import { AIConfigurationError, type AIRouteTarget } from "@/lib/ai/config";
-import { isRegisteredModelId } from "@/lib/ai/models/registry";
+import { isRegisteredModelId, modelById } from "@/lib/ai/models/registry";
+import { recordModelProbeResult } from "@/lib/ai/models/pool";
 import { AIProviderError, logProviderFailure, providerErrorFromException } from "@/lib/ai/provider-error";
 import { recordProviderCall } from "@/lib/ai/provider-latency";
+
+/**
+ * Mark a model as verified at the moment it really answers. This is the single
+ * place every successful real request (chat, agent, build stage) flows through,
+ * so the "Last verified" timestamp on a model card reflects actual use rather
+ * than only an explicit connection test.
+ */
+function markModelVerified(model: string): void {
+  const spec = modelById(model);
+  if (!spec) return;
+  recordModelProbeResult(spec.key, {
+    ok: true,
+    state: "available",
+    code: "OK",
+    message: `${spec.label} responded successfully.`,
+    status: 200,
+    at: new Date().toISOString(),
+  });
+}
 
 export type CompletedAIResponse = {
   target: AIRouteTarget;
@@ -204,6 +224,7 @@ export async function completeWithModel(
         });
       }
       recordProviderCall(target.provider, target.model, Math.max(1, Date.now() - attemptStartedAt), true);
+      markModelVerified(target.model);
       return { target, response };
     } catch (error) {
       if (request.signal?.aborted) throw error;
@@ -276,6 +297,7 @@ export async function* streamWithModel(
           retryable: true,
         });
       }
+      markModelVerified(target.model);
       return;
     } catch (error) {
       if (request.signal?.aborted) throw error;

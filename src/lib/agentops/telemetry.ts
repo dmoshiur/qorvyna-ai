@@ -79,10 +79,15 @@ export function recordToSpans(record: ExecutionRecord): Span[] {
     });
   }
 
+  const stepSpanIds = new Map<string, string>();
+  const stepFinalModel = new Map<string, string>();
   for (const step of record.steps) {
+    const id = spanId(`step:${step.stepId}`);
+    stepSpanIds.set(step.stepId, id);
+    stepFinalModel.set(step.stepId, step.model);
     spans.push({
       traceId: tid,
-      spanId: spanId(`step:${step.stepId}`),
+      spanId: id,
       parentSpanId: agentSpan.get(step.agentId) ?? rootId,
       name: `step.${step.label}`,
       kind: "client",
@@ -97,6 +102,31 @@ export function recordToSpans(record: ExecutionRecord): Span[] {
         "agentops.tokens.in": step.usage.promptTokens,
         "agentops.tokens.out": step.usage.completionTokens,
         "agentops.attempts": step.attempts.length,
+      },
+    });
+  }
+
+  // One span per model attempt, so a fallback chain is visible in the trace:
+  // which model was tried, why it failed, and which model finally took the stage.
+  for (const attempt of record.stepAttempts) {
+    const finalModel = stepFinalModel.get(attempt.stepId) ?? "";
+    spans.push({
+      traceId: tid,
+      spanId: spanId(`stepattempt:${attempt.stepId}:${attempt.attempt}:${attempt.at}`),
+      parentSpanId: stepSpanIds.get(attempt.stepId) ?? rootId,
+      name: `step.attempt.${attempt.outcome}`,
+      kind: "client",
+      startTime: attempt.at,
+      endTime: attempt.at,
+      status: attempt.outcome === "ok" ? "ok" : attempt.outcome === "failed" ? "error" : "unset",
+      attributes: {
+        "agentops.step.id": attempt.stepId,
+        "agentops.step.stage": attempt.stage,
+        "agentops.model": attempt.model,
+        "agentops.attempt": attempt.attempt,
+        "agentops.attempt.outcome": attempt.outcome,
+        "agentops.attempt.error": attempt.error,
+        "agentops.step.final_model": finalModel,
       },
     });
   }

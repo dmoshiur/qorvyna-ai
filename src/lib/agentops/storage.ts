@@ -93,6 +93,7 @@ export function emptyExecutionRecord(executionId: string): ExecutionRecord {
     startedAt: Date.now(),
     agents: [],
     steps: [],
+    stepAttempts: [],
     toolCalls: [],
     pendingApprovals: [],
     loops: [],

@@ -16,6 +16,7 @@ import {
   cloudflareConfigured,
   cloudflareCredentials,
   probeCloudflareCatalog,
+  testCloudflareModel,
 } from "@/lib/ai/cloudflare";
 import { hostedProviderKey, qorvynaModelRoute, routeForModel, type AIRouteTarget } from "@/lib/ai/config";
 import {
@@ -29,6 +30,7 @@ import {
 } from "@/lib/ai/models/registry";
 import type { RouteIntent } from "@/lib/ai/routing-policy";
 import { cooldownRemainingMs } from "@/lib/ai/orchestrator/scheduler";
+import { AIProviderError, sanitizeProviderDetail } from "@/lib/ai/provider-error";
 import {
   PROBE_STATE_LABEL,
   type ModelAvailability,
@@ -85,6 +87,58 @@ export function recordModelProbeResult(
 export function resetModelHealthForTests(): void {
   runtimeHealth.clear();
   cloudflareCatalogCache = null;
+}
+
+/**
+ * Live connectivity probe for a registered model, used by "Refresh status".
+ * Records the result so "Last verified" updates for every model, not just the
+ * availability badges. Returns the probe outcome without throwing.
+ */
+export async function probeModelForRefresh(spec: ModelSpec): Promise<{ ok: boolean; state: ModelProbeState; code: string; message: string; status: number | null }> {
+  const testedAt = new Date().toISOString();
+  if (spec.provider === "cloudflare") {
+    const creds = cloudflareCredentials();
+    if (!creds) {
+      recordModelProbeResult(spec.key, { ok: false, state: "configuration_missing", code: "CLOUDFLARE_NOT_CONFIGURED", message: "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not configured on the server.", status: null, at: testedAt });
+      return { ok: false, state: "configuration_missing", code: "CLOUDFLARE_NOT_CONFIGURED", message: "Cloudflare is not configured on the server.", status: null };
+    }
+    const result = await testCloudflareModel(creds, spec.id);
+    recordModelProbeResult(spec.key, { ok: result.ok, state: result.state, code: result.code, message: result.message, status: result.status, at: testedAt });
+    return { ok: result.ok, state: result.state, code: result.code, message: result.message, status: result.status };
+  }
+  const route = routeForModel(spec);
+  if (!route) {
+    recordModelProbeResult(spec.key, { ok: false, state: "configuration_missing", code: "PROVIDER_NOT_CONFIGURED", message: "No server credential is installed for this model.", status: null, at: testedAt });
+    return { ok: false, state: "configuration_missing", code: "PROVIDER_NOT_CONFIGURED", message: "No server credential is configured for this model.", status: null };
+  }
+  const started = Date.now();
+  try {
+    const response = await route.client.chat({
+      model: route.model,
+      messages: [{ role: "user", content: "Reply with OK." }],
+      maxTokens: 12,
+      temperature: 0,
+      signal: AbortSignal.timeout(15_000),
+    });
+    const ok = Boolean(response.content?.trim());
+    const state: ModelProbeState = ok ? "available" : "temporarily_unavailable";
+    const message = ok ? `${spec.label} responded cleanly.` : `${spec.label} returned an empty response.`;
+    recordModelProbeResult(spec.key, { ok, state, code: ok ? "OK" : "EMPTY_RESPONSE", message, status: 200, at: testedAt });
+    return { ok, state, code: ok ? "OK" : "EMPTY_RESPONSE", message, status: 200 };
+  } catch (error) {
+    const state: ModelProbeState = error instanceof AIProviderError
+      ? (error.code === "CLOUDFLARE_QUOTA_EXHAUSTED" || error.type === "billing" ? "out_of_capacity"
+        : error.type === "authentication" ? (error.status === 403 ? "permission_denied" : "invalid_credentials")
+        : error.type === "rate_limit" ? "rate_limited"
+        : error.modelUnavailable ? "model_not_found"
+        : "temporarily_unavailable")
+      : "temporarily_unavailable";
+    const code = error instanceof AIProviderError ? (error.code ?? error.type.toUpperCase()) : "PROVIDER_PROBE_FAILED";
+    const message = error instanceof AIProviderError ? sanitizeProviderDetail(error.detail) : sanitizeProviderDetail(error instanceof Error ? error.message : "Connectivity check failed.");
+    const status = error instanceof AIProviderError ? error.status ?? null : null;
+    recordModelProbeResult(spec.key, { ok: false, state, code, message, status, at: testedAt });
+    return { ok: false, state, code, message, status };
+  }
 }
 
 /** Live catalog for the hosted provider. null = no hosted credential. */
@@ -158,7 +212,9 @@ function diagnosticHintFor(state: ModelProbeState, spec: ModelSpec): string | nu
         ? "Verify CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in Cloudflare Profile → API Tokens."
         : "Verify the provider API key on the server.";
     case "permission_denied":
-      return "Ensure the Cloudflare API token has Workers AI Read and Workers AI Edit permissions.";
+      return spec.provider === "cloudflare"
+        ? "Ensure the Cloudflare API token has Workers AI Read and Workers AI Edit permissions."
+        : "Ensure the Groq API key has access to this model for this account.";
     case "model_not_found":
       return `Confirm the catalog model identifier (${spec.id}) is enabled on this account.`;
     case "out_of_capacity":
@@ -168,7 +224,7 @@ function diagnosticHintFor(state: ModelProbeState, spec: ModelSpec): string | nu
     case "temporarily_unavailable":
       return "Temporary upstream/network issue. Press Refresh status or Test connection to retry.";
     case "unavailable_for_account":
-      return "This account's model catalog did not include this model. Check Cloudflare account access or token permissions.";
+      return `This account's model catalog did not include this model. Check ${spec.providerLabel} account access or token permissions.`;
     default:
       return null;
   }
