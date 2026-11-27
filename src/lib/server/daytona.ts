@@ -8,15 +8,17 @@ import { safeAgentPath } from "@/lib/ai/agent";
 import { scrubSecrets } from "@/lib/agentops/governance";
 import type { ExecutionGateway } from "@/lib/server/execution-env";
 
-const CONNECTIONS = "daytona_connections";
 const SYSTEM_DOC = "daytona_sandbox";
+/** Pre-migration per-user keys (daytona used to be a user-level setting). */
+const LEGACY_CONNECTIONS = "daytona_connections";
 
 export type DaytonaLanguage = "typescript" | "javascript" | "python";
 
 export type DaytonaStatus = {
   configured: boolean;
   encryptionAvailable: boolean;
-  source: "user" | "system" | "env" | "none";
+  /** Where the single shared key came from: admin-saved, env, or nowhere. */
+  source: "system" | "env" | "none";
   keyLast4: string | null;
   keyMask: string | null;
   target: string;
@@ -162,29 +164,11 @@ function openDaytonaSdk(apiKey: string, target?: string): {
   };
 }
 
-export async function resolveDaytonaCredentials(uid?: string | null): Promise<{
+export async function resolveDaytonaCredentials(): Promise<{
   apiKey: string;
   target: string;
-  source: "user" | "system" | "env";
+  source: "system" | "env";
 } | null> {
-  if (uid && canEncryptDaytonaSecret()) {
-    try {
-      const snap = await adminDb().collection(CONNECTIONS).doc(uid).get();
-      if (snap.exists && snap.data()?.api_key_encrypted) {
-        const apiKey = decryptDaytonaKey(String(snap.data()!.api_key_encrypted));
-        if (validDaytonaApiKey(apiKey)) {
-          return {
-            apiKey,
-            target: String(snap.data()?.target ?? ""),
-            source: "user",
-          };
-        }
-      }
-    } catch {
-      // Fall through to system / env configuration.
-    }
-  }
-
   if (canEncryptDaytonaSecret()) {
     try {
       const sys = await adminDb().collection("system_settings").doc(SYSTEM_DOC).get();
@@ -215,8 +199,8 @@ export async function resolveDaytonaCredentials(uid?: string | null): Promise<{
   return null;
 }
 
-export async function getDaytonaStatus(uid?: string | null): Promise<DaytonaStatus> {
-  const resolved = await resolveDaytonaCredentials(uid);
+export async function getDaytonaStatus(): Promise<DaytonaStatus> {
+  const resolved = await resolveDaytonaCredentials();
   if (!resolved) {
     return {
       configured: false,
@@ -240,9 +224,34 @@ export async function getDaytonaStatus(uid?: string | null): Promise<DaytonaStat
   };
 }
 
-export async function saveDaytonaConnection(
+/** How many legacy per-user Daytona keys still exist (admin migration info). */
+export async function countLegacyDaytonaUserKeys(): Promise<number> {
+  try {
+    const snap = await adminDb().collection(LEGACY_CONNECTIONS).limit(100).get();
+    return snap.docs.filter((d) => Boolean(d.data()?.api_key_encrypted)).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Delete every legacy per-user Daytona key — the system key replaces them all. */
+async function purgeLegacyDaytonaUserKeys(): Promise<number> {
+  try {
+    const snap = await adminDb().collection(LEGACY_CONNECTIONS).limit(100).get();
+    let removed = 0;
+    for (const doc of snap.docs) {
+      await doc.ref.delete();
+      removed += 1;
+    }
+    return removed;
+  } catch {
+    return 0;
+  }
+}
+
+export async function saveDaytonaSystemConnection(
   uid: string,
-  input: { apiKey: string; target?: string; scope?: "user" | "system" },
+  input: { apiKey: string; target?: string },
 ): Promise<DaytonaStatus> {
   const apiKey = input.apiKey.trim();
   if (!validDaytonaApiKey(apiKey)) throw new Error("DAYTONA_KEY_INVALID");
@@ -250,31 +259,71 @@ export async function saveDaytonaConnection(
   const encrypted = encryptDaytonaKey(apiKey);
   const masked = maskKey(apiKey);
 
-  if (input.scope === "system") {
-    await adminDb().collection("system_settings").doc(SYSTEM_DOC).set({
-      api_key_encrypted: encrypted,
-      key_last4: masked.last4,
-      key_mask: masked.mask,
-      target,
-      updated_by: uid,
-      updated_at: nowTs(),
-    }, { merge: true });
-  } else {
-    await adminDb().collection(CONNECTIONS).doc(uid).set({
-      user_id: uid,
-      api_key_encrypted: encrypted,
-      key_last4: masked.last4,
-      key_mask: masked.mask,
-      target,
-      updated_at: nowTs(),
-    }, { merge: true });
+  await adminDb().collection("system_settings").doc(SYSTEM_DOC).set({
+    api_key_encrypted: encrypted,
+    key_last4: masked.last4,
+    key_mask: masked.mask,
+    target,
+    updated_by: uid,
+    updated_at: nowTs(),
+  }, { merge: true });
+
+  // One Daytona everywhere: per-user keys are obsolete the moment a system key
+  // is saved — purge them so stale secrets never linger at rest.
+  const purged = await purgeLegacyDaytonaUserKeys();
+  if (purged > 0) {
+    try {
+      await adminDb().collection("system_settings").doc(`${SYSTEM_DOC}_migration`).set({
+        legacy_user_keys_purged: purged,
+        updated_at: nowTs(),
+      }, { merge: true });
+    } catch {
+      // best-effort migration note
+    }
   }
-  return getDaytonaStatus(uid);
+  return getDaytonaStatus();
 }
 
-export async function deleteDaytonaConnection(uid: string): Promise<DaytonaStatus> {
-  await adminDb().collection(CONNECTIONS).doc(uid).delete();
-  return getDaytonaStatus(uid);
+/**
+ * One-time migration for deployments that stored a per-user Daytona key before
+ * the setting moved to the admin panel: the most recently updated legacy user
+ * key becomes the system key and every legacy per-user key is purged.
+ */
+export async function migrateLegacyDaytonaUserKey(uid: string): Promise<{ status: DaytonaStatus; migrated: boolean }> {
+  let promoted = false;
+  try {
+    const snap = await adminDb().collection(LEGACY_CONNECTIONS).limit(100).get();
+    const candidates = snap.docs
+      .filter((d) => Boolean(d.data()?.api_key_encrypted))
+      .sort((a, b) => Number(b.data()?.updated_at ?? 0) - Number(a.data()?.updated_at ?? 0));
+    const current = await getDaytonaStatus();
+    if (candidates.length > 0 && (!current.configured || current.source === "env")) {
+      for (const newest of candidates) {
+        try {
+          const apiKey = decryptDaytonaKey(String(newest.data()!.api_key_encrypted));
+          if (!validDaytonaApiKey(apiKey)) continue;
+          await saveDaytonaSystemConnection(uid, {
+            apiKey,
+            target: String(newest.data()?.target ?? ""),
+          });
+          promoted = true;
+          break;
+        } catch {
+          // Corrupt/undecryptable legacy key — skip it, try the next one.
+        }
+      }
+    }
+  } catch {
+    // Migration is best-effort: report honestly, never leave a half state.
+  }
+  // Whatever happened, per-user keys have no effect anymore — remove them.
+  await purgeLegacyDaytonaUserKeys();
+  return { status: await getDaytonaStatus(), migrated: promoted };
+}
+
+export async function deleteDaytonaSystemConnection(): Promise<DaytonaStatus> {
+  await adminDb().collection("system_settings").doc(SYSTEM_DOC).delete();
+  return getDaytonaStatus();
 }
 
 function sanitizeOutput(text: string, apiKey: string): string {
@@ -299,7 +348,6 @@ function normalizeWorkspaceFiles(files?: DaytonaWorkspaceFile[]): Array<{ source
 }
 
 export async function runDaytonaCode(
-  uid: string,
   input: {
     code: string;
     language?: DaytonaLanguage;
@@ -315,7 +363,7 @@ export async function runDaytonaCode(
     input.language === "python" || input.language === "javascript" ? input.language : "typescript";
   const timeoutSeconds = Math.min(Math.max(Math.round(input.timeoutSeconds ?? 30), 1), 60);
 
-  const creds = await resolveDaytonaCredentials(uid);
+  const creds = await resolveDaytonaCredentials();
   if (!creds) throw new Error("DAYTONA_NOT_CONFIGURED");
 
   const startedAt = Date.now();
@@ -362,7 +410,6 @@ export async function runDaytonaCode(
 }
 
 export async function runDaytonaCommand(
-  uid: string,
   input: {
     command: string;
     cwd?: string;
@@ -375,7 +422,7 @@ export async function runDaytonaCommand(
     throw new Error("DAYTONA_COMMAND_INVALID");
   }
   const timeoutSeconds = Math.min(Math.max(Math.round(input.timeoutSeconds ?? 30), 1), 60);
-  const creds = await resolveDaytonaCredentials(uid);
+  const creds = await resolveDaytonaCredentials();
   if (!creds) throw new Error("DAYTONA_NOT_CONFIGURED");
 
   const startedAt = Date.now();
@@ -426,7 +473,7 @@ export class DaytonaExecutionGateway implements ExecutionGateway {
   readonly name = "daytona-cloud";
 
   async acquire(input: { sessionId: string; projectId: string | null }): Promise<{ handle: string }> {
-    const creds = await resolveDaytonaCredentials(null);
+    const creds = await resolveDaytonaCredentials();
     if (!creds) return { handle: `inline:${input.sessionId}` };
     const { client, close } = openDaytonaSdk(creds.apiKey, creds.target);
     try {
@@ -444,7 +491,7 @@ export class DaytonaExecutionGateway implements ExecutionGateway {
     if (!handle.startsWith("daytona:")) return;
     const sandboxId = handle.slice("daytona:".length);
     if (!sandboxId) return;
-    const creds = await resolveDaytonaCredentials(null);
+    const creds = await resolveDaytonaCredentials();
     if (!creds) return;
     const { client, close } = openDaytonaSdk(creds.apiKey, creds.target);
     try {

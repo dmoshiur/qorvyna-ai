@@ -18,7 +18,7 @@ export default async function AdminAiPage() {
   return (
     <AdminShell
       title="AI configuration"
-      subtitle="The QORVYNA model (GPT OSS 120B), image generation and usage — with live health checks."
+      subtitle="The QORVYNA model (GPT OSS 120B), image generation, the shared Daytona sandbox and usage — with live health checks."
       role={role}
       codes={codes}
     >
