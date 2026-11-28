@@ -52,7 +52,13 @@ export function MirrorAndLockBanner() {
   const poll = useCallback(async () => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     try {
-      const next = await rpc<MirrorAndLockState>("family_mirror_active");
+      const reply = await rpc<Partial<MirrorAndLockState> | null>("family_mirror_active");
+      // Never store a malformed reply: rendering reads active_sessions directly,
+      // and an undefined state would crash the whole screen.
+      const next: MirrorAndLockState = {
+        active_sessions: Array.isArray(reply?.active_sessions) ? reply.active_sessions : [],
+        locked: reply?.locked ?? null,
+      };
       setState(next);
       for (const s of next.active_sessions) {
         if (!seenSessionsRef.current.has(s.session_id)) {

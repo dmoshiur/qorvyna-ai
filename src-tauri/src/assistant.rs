@@ -158,17 +158,21 @@ pub fn toggle_or_null<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "android")]
-static MOBILE_PLUGIN: std::sync::Mutex<Option<tauri::plugin::PluginHandle<tauri::Wry>>> =
+static MOBILE_PLUGIN: std::sync::Mutex<Option<std::sync::Arc<tauri::plugin::PluginHandle<tauri::Wry>>>> =
     std::sync::Mutex::new(None);
 
 #[cfg(mobile)]
 fn mobile_call(command: &str, payload: Value) -> Result<Value, String> {
     #[cfg(target_os = "android")]
     {
-        let guard = MOBILE_PLUGIN
+        // Clone the handle and release the lock before calling Kotlin: a call
+        // can wait on the user (the Google account sheet), and must not block
+        // every other assistant call meanwhile.
+        let handle = MOBILE_PLUGIN
             .lock()
-            .map_err(|_| "ASSISTANT_UNAVAILABLE".to_string())?;
-        let handle = guard.as_ref().ok_or_else(|| {
+            .map_err(|_| "ASSISTANT_UNAVAILABLE".to_string())?
+            .clone();
+        let handle = handle.ok_or_else(|| {
             "ASSISTANT_UNAVAILABLE: the Android assistant plugin is not attached. Re-run \
              `npm run android:init` so the generated project includes AssistantPlugin."
                 .to_string()
@@ -249,6 +253,23 @@ pub fn open_assistant_settings(which: &str) -> Result<Value, String> {
     }
 }
 
+/// Native Google account picker (Android Credential Manager, Kotlin
+/// `QorvynaGoogleSignIn`). Blocks until the user picks an account or dismisses
+/// the sheet, so callers must run it OFF the main thread (see
+/// `native::qorvyna_google_sign_in`). Errors keep the Kotlin code visible as
+/// `[CODE] - message` (CANCELLED / NO_ACCOUNT / GOOGLE_FAILED).
+pub fn google_sign_in(web_client_id: &str) -> Result<Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        return mobile_call("googleSignIn", json!({ "webClientId": web_client_id }));
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = web_client_id;
+        Err("UNSUPPORTED_PLATFORM: native Google sign-in is Android only.".to_string())
+    }
+}
+
 /// Ask the Android service what it can really do right now.
 pub fn mobile_state() -> Option<Value> {
     #[cfg(target_os = "android")]
@@ -272,7 +293,7 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         match api.register_android_plugin("ai.matrix.desktop", "AssistantPlugin") {
             Ok(handle) => {
                 if let Ok(mut slot) = MOBILE_PLUGIN.lock() {
-                    *slot = Some(handle);
+                    *slot = Some(std::sync::Arc::new(handle));
                 }
             }
             Err(error) => {

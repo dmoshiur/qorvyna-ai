@@ -21,6 +21,11 @@ class ToggleArgs {
     var enabled: Boolean = false
 }
 
+@InvokeArg
+class GoogleSignInArgs {
+    var webClientId: String = ""
+}
+
 /**
  * Tauri plugin `qorvyna-assistant` — the Rust ⇄ Kotlin seam.
  *
@@ -176,6 +181,16 @@ class AssistantPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
         invoke.resolve(stateObject())
+    }
+
+    /**
+     * `googleSignIn` → native Google account picker (Credential Manager); resolves
+     * `{ idToken, email, displayName }` for Firebase. See QorvynaGoogleSignIn.
+     */
+    @Command
+    fun googleSignIn(invoke: Invoke) {
+        val args = invoke.parseArgs(GoogleSignInArgs::class.java)
+        QorvynaGoogleSignIn.signIn(activity, args.webClientId, invoke)
     }
 
     /** Fresh state read; used after mutating calls so the UI never guesses. */

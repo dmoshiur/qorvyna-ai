@@ -12,6 +12,12 @@ import { AuthLifecycleProvider } from "@/components/auth/auth-provider";
 import { PwaManager } from "@/components/pwa-manager";
 import { NativeApp } from "@/native/native-app";
 import { AssistantPopup, isAssistantWindow } from "@/native/assistant-popup";
+import { installNativeApiTransport } from "@/native/api-transport";
+import { optionalAuthHeaders } from "@/lib/client/api";
+
+// Before anything renders: send the shared components' `/api/*` calls to the
+// QORVYNA backend (natively) instead of the bundled files. See api-transport.ts.
+installNativeApiTransport({ authHeaders: () => optionalAuthHeaders() });
 
 const container = document.getElementById("qorvyna-root");
 // The floating assistant is the SAME bundle in a different window: Tauri opens
