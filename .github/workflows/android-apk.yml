@@ -212,7 +212,7 @@ jobs:
           echo "Expected signer SHA-256: $EXPECTED"
           echo "APK signer SHA-256:      $ACTUAL"
           if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-            fail "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update).${NL}expected: $EXPECTED${NL}actual:   $ACTUAL${NL}$(grep '^Signer' <<< "$CERTS" || true)"
+            fail "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update).${NL}expected: $EXPECTED${NL}actual:   $ACTUAL${NL}apksigner $("$TOOL/apksigner" version 2>&1 || true) ($TOOL), $(wc -l <<< "$CERTS") output lines:${NL}$(grep -v "^WARNING" <<< "$CERTS" | sed -n 1,25p)"
           fi
           echo "::notice title=APK signer::$ACTUAL (QORVYNA release key)"
           sha256sum release-assets/QORVYNA-AI-android.apk > release-assets/QORVYNA-AI-android.apk.sha256
