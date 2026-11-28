@@ -99,6 +99,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Install npm dependencies (exactly as the lockfile pins)
+        run: npm ci --no-audit --no-fund
+
       - name: Prepare release signing
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
