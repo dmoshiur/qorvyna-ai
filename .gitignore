@@ -34,4 +34,3 @@ tsconfig.tsbuildinfo
 # tauri desktop build artifacts
 /src-tauri/target
 /src-tauri/gen
-

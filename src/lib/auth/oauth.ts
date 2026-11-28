@@ -29,7 +29,9 @@ import {
   GoogleAuthProvider,
   getAdditionalUserInfo,
   linkWithPopup,
+  linkWithRedirect,
   signInWithPopup,
+  signInWithRedirect,
   type Auth,
   type AuthProvider,
   type User,
@@ -58,15 +60,18 @@ export type OAuthOk = {
   profileLoaded?: boolean;
   profile?: SessionProfileSummary | null;
 };
-
 export type OAuthResult =
   | OAuthOk
   | { status: "cancelled"; message: string; provider: OAuthProviderId }
   | { status: "session-failed"; message: string; provider: OAuthProviderId }
+  | { status: "redirecting"; message: string; provider: OAuthProviderId }
   | { status: "error"; message: string; provider?: OAuthProviderId };
 
 const SESSION_FAILED =
   "Signed in with your account, but the server could not create your session. Tap Retry session — you will not create a second account.";
+
+const REDIRECTING_MESSAGE =
+  "Opening Google sign-in — you will return here automatically when it finishes.";
 
 const BAD_ORIGIN_FAILED =
   "You're signed in, but this domain is not allowed to create the QORVYNA session. An administrator must include this hostname in NEXT_PUBLIC_APP_URL (or QORVYNA_ALLOWED_ORIGINS) and redeploy — your account is fine.";
@@ -154,6 +159,25 @@ const CANCELLED_CODES = new Set([
 /** The user closed/cancelled the popup before completing authentication. */
 export function isOAuthCancelled(err: unknown): boolean {
   return CANCELLED_CODES.has(errorCode(err));
+}
+
+/**
+ * True when the shared frontend runs inside the QORVYNA desktop/Android shell
+ * (Tauri v2 exposes these globals to the bundled frontend). In the Android
+ * WebView there is no popup window: `signInWithPopup` can never complete, so
+ * the Google flow falls back to a full-page redirect handled by Firebase's
+ * own resolver (`browserPopupRedirectResolver` is registered at
+ * `initializeAuth` in src/lib/firebase/client.ts, so the result is consumed
+ * automatically on return — no manual `getRedirectResult` call anywhere).
+ */
+export function isQorvynaWebView(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const host = window as typeof window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
+    return Boolean(host.__TAURI__) || Boolean(host.__TAURI_INTERNALS__);
+  } catch {
+    return false;
+  }
 }
 
 function isStorageBlocked(err: unknown): boolean {
@@ -312,6 +336,31 @@ export async function startOAuthSignIn(
       });
       return { status: "cancelled", message: describeOAuthFailure(err, provider), provider };
     }
+    // QORVYNA's Android/desktop shell has no popup window: fall back to a
+    // full-page redirect (consumed automatically by the registered resolver
+    // when Google returns the user to the app).
+    if (isQorvynaWebView()) {
+      logAuthEvent("AUTH_POPUP_ERROR", {
+        stage: "popup-result",
+        method: "webview-redirect-fallback",
+        provider,
+        error: err,
+        detail: { outcome: "fallback_redirect" },
+      });
+      try {
+        await signInWithRedirect(auth, makeProvider(provider));
+        return { status: "redirecting", message: REDIRECTING_MESSAGE, provider };
+      } catch (redirectErr) {
+        logAuthEvent("AUTH_POPUP_ERROR", {
+          stage: "redirect-result",
+          method: "webview-redirect-fallback",
+          provider,
+          error: redirectErr,
+          detail: { outcome: "failed" },
+        });
+        return { status: "error", message: describeOAuthFailure(redirectErr, provider), provider };
+      }
+    }
     logAuthEvent("AUTH_POPUP_ERROR", {
       stage: "popup-result",
       method: "popup",
@@ -378,6 +427,18 @@ export async function startOAuthLink(provider: OAuthProviderId): Promise<OAuthRe
         detail: { outcome: "cancelled" },
       });
       return { status: "cancelled", message: describeOAuthFailure(err, provider), provider };
+    }
+    // Same WebView constraint as sign-in: no popup window in the app shell,
+    // so linking falls back to the full-page redirect transport as well.
+    if (isQorvynaWebView()) {
+      logAuthEvent("AUTH_POPUP_ERROR", { stage: "link-result", method: "webview-redirect-fallback", provider, error: err });
+      try {
+        await linkWithRedirect(user, makeProvider(provider));
+        return { status: "redirecting", message: REDIRECTING_MESSAGE, provider };
+      } catch (redirectErr) {
+        logAuthEvent("AUTH_POPUP_ERROR", { stage: "redirect-result", method: "webview-redirect-fallback", provider, error: redirectErr });
+        return { status: "error", message: describeOAuthFailure(redirectErr, provider), provider };
+      }
     }
     logAuthEvent("AUTH_POPUP_ERROR", { stage: "link-result", method: "link", provider, error: err });
     return { status: "error", message: describeOAuthFailure(err, provider), provider };

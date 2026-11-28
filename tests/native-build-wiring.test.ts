@@ -26,14 +26,35 @@ describe("Phase 13 — build tooling resolves", () => {
   });
 
   it("every documented native script exists and points at a real command", () => {
-    for (const name of ["tauri:dev", "tauri:build", "android:init", "android:manifest", "android:build", "windows:build", "native:check"]) {
+    for (const name of ["tauri:dev", "tauri:build", "android:init", "android:manifest", "android:build", "android:apk", "android:apk:release", "windows:build", "native:check"]) {
       expect(pkg.scripts[name], `missing script ${name}`).toBeTruthy();
     }
     // Native builds must regenerate the bundle first, otherwise they ship a
     // stale frontend. `tauri dev` uses devUrl and must not.
     expect(pkg.scripts["android:build"]).toContain("build-native-frontend.mjs");
     expect(pkg.scripts["windows:build"]).toContain("build-native-frontend.mjs");
+    expect(pkg.scripts["android:apk"]).toContain("ensure-android-project");
+    expect(pkg.scripts["android:apk"]).toContain("--apk");
+    expect(pkg.scripts["android:apk:release"]).toContain("--apk");
+    expect(pkg.scripts["android:apk:release"]).not.toContain("--debug");
     expect(pkg.scripts["android:init"]).toContain("patch-android-manifest");
+  });
+
+  it("bundles the Firebase web config from google-services.json (Google sign-in works in the APK)", () => {
+    // The APK is a static bundle with no server: without this, the shipped
+    // bundle contains unresolved process.env.NEXT_PUBLIC_FIREBASE_* — the app
+    // crashes on boot and Continue-with-Google can never be configured.
+    const bundler = readFileSync(path.join(ROOT, "scripts/native/build-native-frontend.mjs"), "utf8");
+    expect(bundler).toContain("google-services.json");
+    const gs = JSON.parse(readFileSync(path.join(ROOT, "google-services.json"), "utf8")) as {
+      project_info: { project_id: string };
+      client: { client_info: { android_client_info?: { package_name?: string }; mobilesdk_app_id: string }; api_key: { current_key: string }[] }[];
+    };
+    const app = gs.client.find((c) => c.client_info.android_client_info?.package_name === "ai.matrix.desktop");
+    expect(app, "google-services.json must contain the ai.matrix.desktop Android app").toBeTruthy();
+    expect(app!.api_key[0].current_key).toMatch(/^AIza/);
+    expect(app!.client_info.mobilesdk_app_id).toContain("android");
+    expect(gs.project_info.project_id).toBeTruthy();
   });
 });
 

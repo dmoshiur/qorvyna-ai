@@ -378,11 +378,11 @@ does not ship an always-listening model, so the assistant state reports
 
 The Android project does not exist until `tauri android init` generates it.
 
-> **Easier paths:** `npm run android:apk` (one command, debug-signed installable
-> APK) or the GitHub Actions workflow **Android APK build**
-> (`.github/workflows/android-apk.yml`) that builds the APK in CI and uploads it
-> as a downloadable artifact — no local Android toolchain needed. The script
-> below remains the fully-validated local release path.
+> **Easier paths:** `npm run android:apk` (one command, installable APK) or the GitHub Actions workflow
+> **Android APK build** (`.github/workflows/android-apk.yml`) that builds a **signed release APK** in CI,
+> publishes it as the public `apk-latest` GitHub Release
+> (`/releases/latest/download/QORVYNA-AI-android.apk`), and uploads the per-ABI variants as a build
+> artifact. The script below remains the fully-validated local release path.
 
 ### 7.1 One-time initialisation
 

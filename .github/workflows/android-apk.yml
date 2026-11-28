@@ -38,7 +38,9 @@ on:
       - ".github/workflows/android-apk.yml"
 
 permissions:
-  contents: read
+  # contents: write is what allows publishing the public apk-latest release
+  # (the release step itself only runs on pushes to main).
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -100,13 +102,38 @@ jobs:
       - name: Install npm dependencies (exactly as the lockfile pins)
         run: npm ci --no-audit --no-fund
 
-      # Bundles the frontend into public/native, initializes + patches the
-      # generated Android project when needed (assistant bubble service,
-      # wake-word plugin, notification listener), then builds a debug-signed
-      # installable APK — the identical command documented for local builds.
-      - name: Build the APK
+      - name: Prepare release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          npm run android:apk 2>&1 | tee "$RUNNER_TEMP/build.log"
+          mkdir -p signing
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > signing/qorvyna-upload.jks
+            echo "[sign] using the keystore from repository secrets"
+          else
+            echo "[sign] no secrets configured — using the committed debug-grade keystore"
+          fi
+          STORE_PASSWORD="${ANDROID_KEYSTORE_PASSWORD:-$(cat signing/keystore-password.txt)}"
+          KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$(cat signing/keystore-password.txt)}"
+          KEY_ALIAS="${ANDROID_KEY_ALIAS:-qorvyna}"
+          {
+            echo "storeFile=$GITHUB_WORKSPACE/signing/qorvyna-upload.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > signing/keystore.properties
+          sed 's/storePassword=.*/storePassword=***/; s/keyPassword=.*/keyPassword=***/' signing/keystore.properties
+
+      # Bundles the frontend (Firebase config baked in from google-services.json),
+      # initializes + patches + brands the generated Android project, places
+      # keystore.properties into it, and builds the signed RELEASE APK — one
+      # command, identical to the documented local release build.
+      - name: Build the signed release APK
+        run: |
+          npm run android:apk:release 2>&1 | tee "$RUNNER_TEMP/build.log"
           exit "${PIPESTATUS[0]}"
 
       # GitHub now requires sign-in to view raw logs; the step summary is
@@ -141,7 +168,49 @@ jobs:
         run: |
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -type f -exec ls -lh {} \;
 
-      - name: Upload the APK artifact
+      # A stable-named, PUBLICLY downloadable copy goes to GitHub Releases:
+      # /releases/latest/download/<asset> needs no login at all, unlike
+      # Actions artifacts.
+      - name: Prepare the public release assets
+        run: |
+          UNIVERSAL=$(find src-tauri/gen/android/app/build/outputs/apk -name "app-universal-release.apk" -type f | head -n 1)
+          if [ -z "$UNIVERSAL" ]; then
+            UNIVERSAL=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" -type f | sort | tail -n 1)
+          fi
+          if [ -z "$UNIVERSAL" ]; then
+            echo "No release APK found"; exit 1
+          fi
+          mkdir -p release-assets
+          cp "$UNIVERSAL" release-assets/QORVYNA-AI-android.apk
+          # Verify the APK is really signed before publishing it.
+          TOOL=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
+          "$TOOL/apksigner" verify --print-certs "$UNIVERSAL" | head -4 || { echo "APK signature verification FAILED"; exit 1; }
+          sha256sum release-assets/QORVYNA-AI-android.apk > release-assets/QORVYNA-AI-android.apk.sha256
+          ls -lh release-assets
+
+      - name: Publish the public APK release (apk-latest)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: "QORVYNA AI — Android APK (latest)"
+          body: |
+            Installable release APK for `ai.matrix.desktop` — signed with the QORVYNA release key.
+
+            **Direct download:** the `QORVYNA-AI-android.apk` asset below (or permanently at
+            `https://github.com/dmoshiur/qorvyna-ai/releases/latest/download/QORVYNA-AI-android.apk`).
+
+            - Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under settings → Assistant.
+            - “Continue with Google” works in the app; the Firebase config is baked in.
+            - Per-ABI debug variants remain available as the **QORVYNA-AI-APK** build artifact.
+          files: |
+            release-assets/QORVYNA-AI-android.apk
+            release-assets/QORVYNA-AI-android.apk.sha256
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload the full APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: QORVYNA-AI-APK
@@ -154,11 +223,10 @@ jobs:
           {
             echo "## QORVYNA AI APK"
             echo ""
-            echo "Download the **QORVYNA-AI-APK** artifact above, unzip it, and install"
-            echo "\`app-universal-debug.apk\` on the phone (works on arm64 / armv7 / x86_64)."
+            echo "**Public direct download:** \`https://github.com/dmoshiur/qorvyna-ai/releases/latest/download/QORVYNA-AI-android.apk\`"
+            echo "(also on the [Releases page](https://github.com/dmoshiur/qorvyna-ai/releases/latest) as \`apk-latest\`)."
             echo ""
-            echo "- The APK is **debug-signed** for easy installs — uninstall any"
-            echo "  differently-signed previous build before installing."
-            echo "- Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under"
-            echo "  settings → Assistant (record the phrase twice, on-device only)."
+            echo "- Signed release build (universal: arm64 / armv7 / x86_64) — installs and updates in place."
+            echo "- Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under settings → Assistant."
+            echo "- Firebase (Continue with Google) is baked into the bundle from google-services.json."
           } >> "$GITHUB_STEP_SUMMARY"

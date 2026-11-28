@@ -247,30 +247,42 @@ rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-andro
 
 ### The easy ways to get an APK
 
-**1. No local toolchain at all — let GitHub Actions build it.**
-The repository ships `.github/workflows/android-apk.yml`: it builds an
-installable APK on GitHub's servers and uploads it as the **QORVYNA-AI-APK**
-artifact. Open the repo on GitHub → **Actions** → **Android APK build** →
-**Run workflow** (works on any branch). It also runs automatically on every
-push to `main` and on PRs that touch app code. When the run finishes, download
-the artifact, unzip it, and install `app-universal-debug.apk` on the phone.
+**1. No toolchain, no login — the public release download.**
+The CI workflow builds a **signed release APK** and publishes it as the
+`apk-latest` GitHub Release. The permanent direct-download URL is:
 
-**2. One command locally (needs the toolchain above).**
-
-```bash
-npm run android:apk
+```
+https://github.com/dmoshiur/qorvyna-ai/releases/latest/download/QORVYNA-AI-android.apk
 ```
 
-`android:apk` bundles the shared frontend, makes sure the generated Android
-project exists (`scripts/native/ensure-android-project.mjs` runs
-`tauri android init` + the manifest patch when needed) and produces a
-**debug-signed, installable** APK under
-`src-tauri/gen/android/app/build/outputs/apk/…`. Debug-signed means it installs
-on any device with zero keystore work — for a Play release, build and sign a
-release APK as described under “Signing (release)” below.
+No sign-in is needed (unlike Actions artifacts). The APK is signed with the
+repository's release key (`signing/qorvyna-upload.jks` — see
+`signing/README.md` for the fingerprints to register in the Firebase
+console), so installs **update in place** instead of fighting signature
+mismatches.
 
-> Note: a debug-signed APK cannot update in place over a differently-signed
-> build — uninstall the old one first.
+**2. No local toolchain — let GitHub Actions build it.**
+`.github/workflows/android-apk.yml` builds the APK on GitHub's servers on
+every push to `main` (and on app-related PRs, and on demand from the Actions
+tab). Artifacts: **QORVYNA-AI-APK** (all ABIs).
+
+**3. One command locally (needs the toolchain above).**
+
+```bash
+npm run android:apk            # debug-signed, installable
+npm run android:apk:release    # release-signed (uses signing/keystore.properties if present)
+```
+
+Either command bundles the shared frontend — with the **Firebase web config
+baked in from `google-services.json`** so "Continue with Google" works inside
+the app — initializes + patches + brands the generated Android project and
+produces an installable APK under
+`src-tauri/gen/android/app/build/outputs/apk/…`.
+
+> Note: Google sign-in inside the APK uses a full-page redirect (there is no
+> popup window in the WebView); the result is consumed automatically on
+> return. A bare "AI" sentence never wakes the assistant — see the wake word
+> section above.
 
 ### One-time project init
 

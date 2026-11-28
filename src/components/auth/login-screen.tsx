@@ -342,6 +342,14 @@ export function LoginForm() {
       setNotice(result.message);
       return;
     }
+    if (result.status === "redirecting") {
+      // The app shell (Android WebView) is navigating to Google and back;
+      // Firebase consumes the redirect result on return and the normal
+      // lifecycle restores the session — keep the spinner up.
+      setNotice(result.message);
+      setStarting(provider);
+      return;
+    }
     if (result.status === "session-failed") {
       setError(result.message);
       setSessionRetry(true);

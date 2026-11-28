@@ -20,7 +20,7 @@
 // Usage: node scripts/native/ensure-android-project.mjs
 // =============================================================================
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,3 +46,22 @@ if (!existsSync(join(genAndroid, "app"))) {
 
 console.log("[android] re-applying the manifest/Kotlin patch (idempotent).");
 run("node", ["scripts/native/patch-android-manifest.mjs"]);
+
+// Brand the launcher icon: `tauri icon` writes the QORVYNA mipmaps straight
+// into the generated project's res/ folders (and refreshes src-tauri/icons).
+// Without this, `tauri android init` ships Tauri's own default launcher icon.
+console.log("[android] generating the branded launcher icons (tauri icon).");
+run("npx", ["tauri", "icon", "src-tauri/icons/icon.png"]);
+
+// Release signing: when signing/keystore.properties exists (CI prepares it;
+// a local build may provide its own), copy it into the generated project root
+// where the Tauri Gradle template reads it — release APKs then install as
+// signed updates instead of failing with "App not installed".
+const keystoreProps = join(root, "signing", "keystore.properties");
+if (existsSync(keystoreProps)) {
+  const target = join(genAndroid, "keystore.properties");
+  writeFileSync(target, readFileSync(keystoreProps, "utf8"));
+  console.log("[android] release signing: keystore.properties placed in the generated project.");
+} else {
+  console.log("[android] release signing: no signing/keystore.properties — release builds will be unsigned (debug builds install fine).");
+}

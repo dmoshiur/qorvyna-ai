@@ -148,6 +148,63 @@ function insertComponent(manifest, name, block) {
   };
 }
 
+// -----------------------------------------------------------------------------
+// Release signing. The Tauri-generated app/build.gradle.kts has no signing
+// configuration, so `tauri android build` produces an UNSIGNED release APK
+// that no device will install. When keystore.properties exists in the
+// generated project root (CI writes it; a local build can provide its own),
+// wire a signingConfigs.release block + attach it to the release buildType.
+// Idempotent: guarded by a marker comment.
+// -----------------------------------------------------------------------------
+const SIGNING_MARKER = "// QORVYNA release signing (patch-android-manifest.mjs)";
+
+const SIGNING_CONFIG_BLOCK = `    ${SIGNING_MARKER}
+    signingConfigs {
+        val keystorePropertiesFile = rootProject.file("keystore.properties")
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                val keystoreProperties = Properties()
+                keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+`;
+
+const RELEASE_SIGNING_BLOCK = `            ${SIGNING_MARKER} (release buildType)
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+`;
+
+/** Wire keystore.properties into the generated Gradle build (idempotent). */
+async function patchGradleSigning() {
+  const gradleFile = path.join(GEN, "app/build.gradle.kts");
+  if (!(await exists(gradleFile))) {
+    console.log("[android] app/build.gradle.kts not found — skipping signing patch.");
+    return false;
+  }
+  let gradle = await readFile(gradleFile, "utf8");
+  if (gradle.includes(SIGNING_MARKER)) {
+    console.log("[android] Gradle release signing already wired.");
+    return false;
+  }
+  const androidBlock = /^android \{[^\S\n]*\n/m.exec(gradle);
+  if (!androidBlock) throw new Error("[android] app/build.gradle.kts has no `android {` block; refusing to guess.");
+  gradle = `${gradle.slice(0, androidBlock.index + androidBlock[0].length)}${SIGNING_CONFIG_BLOCK}${gradle.slice(androidBlock.index + androidBlock[0].length)}`;
+
+  const releaseBlock = /^[ \t]*getByName\("release"\) \{[^\S\n]*\n/m.exec(gradle);
+  if (!releaseBlock) throw new Error('[android] app/build.gradle.kts has no `getByName("release")` block; refusing to guess.');
+  gradle = `${gradle.slice(0, releaseBlock.index + releaseBlock[0].length)}${RELEASE_SIGNING_BLOCK}${gradle.slice(releaseBlock.index + releaseBlock[0].length)}`;
+
+  await writeFile(gradleFile, gradle, "utf8");
+  return true;
+}
+
 async function main() {
   if (!(await exists(MANIFEST))) {
     console.error(
@@ -158,6 +215,7 @@ async function main() {
   }
 
   const copied = await syncKotlin();
+  const gradleSigned = await patchGradleSigning();
 
   const original = await readFile(MANIFEST, "utf8");
   const permissions = declarePermissions(original);
@@ -170,14 +228,15 @@ async function main() {
 
   const changed =
     copied.length > 0 ||
+    gradleSigned ||
     permissions.added.length > 0 ||
     notification.changed ||
     assistant.changed;
 
   if (!changed) {
     console.log(
-      "[android] Notification listener, assistant service/activity and Kotlin sources are " +
-        "already declared — nothing to do.",
+      "[android] Notification listener, assistant service/activity, Kotlin sources and release signing are " +
+        "already in place — nothing to do.",
     );
   } else {
     await writeFile(MANIFEST, manifest, "utf8");
@@ -186,6 +245,7 @@ async function main() {
     if (assistant.changed) {
       console.log("[android] Declared QorvynaAssistantService and AssistActivity (ASSIST role).");
     }
+    if (gradleSigned) console.log("[android] Wired release signing from keystore.properties (when present).");
   }
 
   console.log(
