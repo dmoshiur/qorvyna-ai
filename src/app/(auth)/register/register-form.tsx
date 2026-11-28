@@ -155,6 +155,13 @@ export function RegisterForm() {
       setNotice(result.message);
       return;
     }
+    if (result.status === "redirecting") {
+      // App-shell WebView: navigating to Google and back; the redirect result
+      // is consumed automatically on return by the registered resolver.
+      setNotice(result.message);
+      setStarting(provider);
+      return;
+    }
     if (result.status === "session-failed") {
       setError(result.message);
       setSessionRetry(true);

@@ -32,7 +32,7 @@ export function AccountForm({ profile, countries }: { profile: Profile | null; c
   const [avatar, setAvatar] = useState(profile?.avatar_url ?? "");
   const [busy, setBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
-  const [msg, setMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const [msg, setMsg] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
   const [linking, setLinking] = useState<OAuthProviderId | null>(null);
 
   /** Link an OAuth provider to the current account via Firebase popup (`linkWithPopup`). */
@@ -48,6 +48,13 @@ export function AccountForm({ profile, countries }: { profile: Profile | null; c
     }
     if (result.status === "cancelled") {
       setMsg({ tone: "danger", text: result.message });
+      return;
+    }
+    if (result.status === "redirecting") {
+      // App-shell WebView: navigating to Google and back; the link completes
+      // from the redirect result on return.
+      setMsg({ tone: "info", text: result.message });
+      setLinking(provider);
       return;
     }
     if (result.status === "error" || result.status === "session-failed") {

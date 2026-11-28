@@ -16,13 +16,14 @@
 
 import { firebaseAuthDomain, firebaseAuthUsesSameOriginHandler, firebaseProjectId } from "@/lib/env-public";
 
-export type AuthMethod = "google" | "facebook" | "password" | "popup" | "link" | "session";
+export type AuthMethod = "google" | "facebook" | "password" | "popup" | "link" | "session" | "webview-redirect-fallback";
 export type AuthStage =
   | "start"
   | "popup-start"
   | "popup-result"
   | "link-start"
   | "link-result"
+  | "redirect-result"
   | "session-mint"
   | "sign-out"
   // Centralised authentication lifecycle (src/lib/auth/lifecycle.ts). Each

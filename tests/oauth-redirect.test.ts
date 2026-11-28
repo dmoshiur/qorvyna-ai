@@ -17,6 +17,8 @@ import path from "node:path";
 const mocks = vi.hoisted(() => ({
   signInWithPopup: vi.fn(),
   linkWithPopup: vi.fn(),
+  signInWithRedirect: vi.fn(),
+  linkWithRedirect: vi.fn(),
   getAdditionalUserInfo: vi.fn(),
   mintSessionCookie: vi.fn(),
   authStateReady: vi.fn(),
@@ -34,6 +36,8 @@ vi.mock("firebase/auth", () => ({
   },
   signInWithPopup: mocks.signInWithPopup,
   linkWithPopup: mocks.linkWithPopup,
+  signInWithRedirect: mocks.signInWithRedirect,
+  linkWithRedirect: mocks.linkWithRedirect,
   getAdditionalUserInfo: mocks.getAdditionalUserInfo,
 }));
 
@@ -112,13 +116,15 @@ afterEach(() => {
 });
 
 describe("popup transport & obsolete redirect removal", () => {
-  it("removes signInWithRedirect, linkWithRedirect, getRedirectResult and null_redirect_after_pending from the active auth flow", () => {
+  it("keeps the browser flow popup-only: no cross-origin redirect OAuth outside the WebView fallback", () => {
+    // Policy update: the QORVYNA Android/desktop shell has no popup window, so
+    // oauth.ts deliberately falls back to a full-page redirect THERE ONLY
+    // (gated by isQorvynaWebView(); the result is consumed automatically by
+    // the resolver registered at initializeAuth — no manual
+    // getRedirectResult call anywhere). Plain browser surfaces keep the
+    // popup-only transport and never mention redirect OAuth.
     for (const file of [
-      "src/lib/auth/oauth.ts",
       "src/lib/auth/lifecycle.ts",
-      "src/components/auth/login-screen.tsx",
-      "src/app/(auth)/register/register-form.tsx",
-      "src/components/settings/account-form.tsx",
       "src/app/verify/page.tsx",
     ]) {
       const text = readFileSync(path.resolve(__dirname, "..", file), "utf8");
@@ -127,6 +133,13 @@ describe("popup transport & obsolete redirect removal", () => {
       expect(text, file).not.toContain("getRedirectResult");
       expect(text, file).not.toContain("null_redirect_after_pending");
     }
+    const oauthText = readFileSync(path.resolve(__dirname, "..", "src/lib/auth/oauth.ts"), "utf8");
+    expect(oauthText).toContain("signInWithPopup");
+    // The redirect fallback must be gated to the app shell, never used as the
+    // browser transport:
+    expect(oauthText).toContain("isQorvynaWebView");
+    const gatedCalls = oauthText.split("isQorvynaWebView()").length - 1;
+    expect(gatedCalls).toBeGreaterThanOrEqual(2);
   });
 
   it("signs in via signInWithPopup, verifies credential.user, mints session once and clears remembered destination", async () => {
@@ -156,6 +169,33 @@ describe("popup transport & obsolete redirect removal", () => {
     const second = await oauth.startOAuthSignIn("google", { next: "/chat" });
     expect(second).toMatchObject({ status: "ok", uid: "uid-1" });
     expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to a full-page redirect inside the QORVYNA WebView when no popup window exists", async () => {
+    // The Android/desktop shell: popups cannot open, so the first attempt
+    // fails and the flow redirects instead (result consumed on return by the
+    // resolver registered at initializeAuth).
+    installWindow(memoryStorage());
+    (globalThis as unknown as { window: Record<string, unknown> }).window.__TAURI_INTERNALS__ = {};
+    mocks.signInWithPopup.mockRejectedValue({ code: "auth/popup-blocked" });
+    mocks.signInWithRedirect.mockResolvedValue(undefined);
+    const oauth = await loadOAuth();
+    const result = await oauth.startOAuthSignIn("google", { next: "/chat" });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ status: "redirecting", provider: "google" });
+    expect(mocks.mintSessionCookie).not.toHaveBeenCalled();
+  });
+
+  it("reports the redirect transport's own failure instead of a popup error", async () => {
+    installWindow(memoryStorage());
+    (globalThis as unknown as { window: Record<string, unknown> }).window.__TAURI_INTERNALS__ = {};
+    mocks.signInWithPopup.mockRejectedValue({ code: "auth/popup-blocked" });
+    mocks.signInWithRedirect.mockRejectedValue({ code: "auth/unauthorized-domain" });
+    const oauth = await loadOAuth();
+    const result = await oauth.startOAuthSignIn("google");
+    expect(result.status).toBe("error");
+    expect((result as { message: string }).message).toContain("domain");
   });
 
   it("reports new Google accounts with isNewUser: true", async () => {

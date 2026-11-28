@@ -28,6 +28,106 @@ const checkOnly = process.argv.includes("--check");
 const API_ORIGIN = (process.env.QORVYNA_API_ORIGIN || process.env.NEXT_PUBLIC_APP_URL || "https://qorvyna.thamjj13.top").replace(/\/+$/, "");
 const APP_VERSION = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 
+// -----------------------------------------------------------------------------
+// Firebase web config for the bundled app.
+//
+// The APK is a static bundle: there is no server to inject NEXT_PUBLIC_* at
+// runtime, and esbuild does not read .env files — an unresolved
+// `process.env.NEXT_PUBLIC_*` reference ships verbatim, crashes the bundle on
+// boot (`process` is undefined in a webview) and leaves Firebase unconfigured
+// ("Continue with Google" could never work). This block resolves the config
+// exactly once, at bundle time, from:
+//
+//   1. the environment (same variables the website deploys use), then
+//   2. `google-services.json` — the Firebase Android descriptor (committed;
+//      its apiKey/appId are public identifiers by Firebase's design, the same
+//      values already ship inside every installed APK).
+//
+// Every value is then baked via esbuild `--define` below, so the bundle sees
+// exactly what `next build` would have inlined for the website.
+// -----------------------------------------------------------------------------
+function firebaseConfigFromGoogleServices() {
+  const file = join(root, "google-services.json");
+  if (!existsSync(file)) return null;
+  let gs;
+  try {
+    gs = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    fail(`google-services.json exists but is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const pkgOf = (client) => (client.client_info?.android_client_info || {}).package_name;
+  const app = (gs.client || []).find((client) => pkgOf(client) === "ai.matrix.desktop");
+  if (!app) {
+    fail("google-services.json has no client entry for ai.matrix.desktop — re-download it from the Firebase console for this package.");
+  }
+  return {
+    apiKey: app.api_key?.[0]?.current_key ?? "",
+    authDomain: "",
+    projectId: gs.project_info?.project_id ?? "",
+    messagingSenderId: gs.project_info?.project_number ?? "",
+    appId: app.client_info?.mobilesdk_app_id ?? "",
+  };
+}
+
+const FIREBASE_KEYS = ["apiKey", "authDomain", "projectId", "messagingSenderId", "appId"];
+/** Keys that MUST exist somewhere; authDomain is derived by the app itself. */
+const FIREBASE_REQUIRED_KEYS = ["apiKey", "projectId", "messagingSenderId", "appId"];
+
+function firebaseEnvName(key) {
+  const snake = key.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase();
+  return "NEXT_PUBLIC_FIREBASE_" + snake;
+}
+
+const fromEnv = Object.fromEntries(FIREBASE_KEYS.map((key) => [key, process.env[firebaseEnvName(key)] ?? ""]));
+const fromFile = firebaseConfigFromGoogleServices() ?? {};
+const FIREBASE_PUBLIC_CONFIG = Object.fromEntries(
+  FIREBASE_KEYS.map((key) => {
+    const value = String(fromEnv[key] || fromFile[key] || "").trim();
+    if (!value && FIREBASE_REQUIRED_KEYS.includes(key)) {
+      fail(
+        `Firebase is not configured for the native bundle: ${firebaseEnvName(key)} is unset and google-services.json does not provide "${key}". ` +
+          "Commit google-services.json (Firebase console → Project settings → Android app) or export the NEXT_PUBLIC_FIREBASE_* variables.",
+      );
+    }
+    return [key, value];
+  }),
+);
+
+const firebaseConfigSource = FIREBASE_KEYS.every((key) => String(fromEnv[key] || "").trim()) ? "environment" : "google-services.json";
+console.log(`[native] firebase: project ${FIREBASE_PUBLIC_CONFIG.projectId} (from ${firebaseConfigSource})`);
+
+/** Every NEXT_PUBLIC_* variable the shared source reads — all must be defined. */
+function nextPublicNamesInSource() {
+  const names = new Set(["NEXT_PUBLIC_QORVYNA_NATIVE"]);
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+      const text = readFileSync(full, "utf8");
+      for (const match of text.matchAll(/process\.env\.(NEXT_PUBLIC_[A-Z0-9_]+)/g)) names.add(match[1]);
+    }
+  };
+  walk(join(root, "src"));
+  return names;
+}
+
+/** esbuild `--define` arguments: public config + honest fallbacks for the rest. */
+function publicDefines() {
+  const defines = new Map();
+  for (const [key, value] of Object.entries(FIREBASE_PUBLIC_CONFIG)) {
+    defines.set("process.env." + firebaseEnvName(key), JSON.stringify(value));
+  }
+  defines.set("process.env.NEXT_PUBLIC_APP_URL", JSON.stringify(API_ORIGIN));
+  for (const name of nextPublicNamesInSource()) {
+    if (!defines.has(`process.env.${name}`)) defines.set(`process.env.${name}`, '""');
+  }
+  return [...defines.entries()].map(([name, value]) => `--define:${name}=${value}`);
+}
+
 function fail(message) {
   console.error(`\n[native] ${message}\n`);
   process.exit(1);
@@ -134,8 +234,12 @@ try {
       "--loader:.woff2=file",
       "--loader:.svg=dataurl",
       "--alias:@=./src",
+      // Bake the environment the website gets from `next build`: Firebase
+      // config (from env / google-services.json), the API origin and every
+      // other NEXT_PUBLIC_* the shared source reads. An unreplaced
+      // process.env.X would crash the webview bundle at boot.
       "--define:process.env.NODE_ENV=\"production\"",
-      "--define:process.env.NEXT_PUBLIC_QORVYNA_NATIVE=\"1\"",
+      ...publicDefines(),
       "--log-level=warning",
       "--minify",
     ],
