@@ -149,16 +149,33 @@ function insertComponent(manifest, name, block) {
 }
 
 // -----------------------------------------------------------------------------
-// Release signing. The Tauri-generated app/build.gradle.kts has no signing
-// configuration, so `tauri android build` produces an UNSIGNED release APK
-// that no device will install. When keystore.properties exists in the
-// generated project root (CI writes it; a local build can provide its own),
-// wire a signingConfigs.release block + attach it to the release buildType.
-// Idempotent: guarded by a marker comment.
+// App signing — ONE identity for every APK this project produces.
+//
+// Android only lets an APK replace an installed app when both are signed with
+// the same certificate; otherwise the installer fails with "App not installed
+// as package conflicts with an existing package". The Tauri-generated
+// app/build.gradle.kts has no signing configuration at all, which caused that:
+//   • release builds came out UNSIGNED (no device installs them), and
+//   • debug builds were signed with the machine's auto-generated
+//     ~/.android/debug.keystore — a different, random key on every CI runner
+//     and every developer PC — so no two builds could update each other, and
+//     none could update (or be updated by) the signed release APK.
+//
+// This wires a single `release` signing config, resolved in this order:
+//   1. keystore.properties in the generated project root (CI writes it from
+//      repository secrets / the committed key; a local build may provide one);
+//   2. otherwise the committed QORVYNA key, signing/qorvyna-upload.jks
+//      (alias `qorvyna`, password in signing/keystore-password.txt);
+// and attaches it to BOTH the release and the debug buildTypes, so every APK —
+// CI or local, `--debug` or release — installs over and updates the others.
+// Idempotent: guarded by a marker comment; projects patched by the previous
+// (release-only) version of this script are upgraded in place.
 // -----------------------------------------------------------------------------
-const SIGNING_MARKER = "// QORVYNA release signing (patch-android-manifest.mjs)";
+const SIGNING_MARKER = "// QORVYNA app signing v2 (patch-android-manifest.mjs)";
 
-const SIGNING_CONFIG_BLOCK = `    ${SIGNING_MARKER}
+// Previous release-only blocks, removed verbatim when upgrading a project.
+const LEGACY_SIGNING_MARKER = "// QORVYNA release signing (patch-android-manifest.mjs)";
+const LEGACY_SIGNING_CONFIG_BLOCK = `    ${LEGACY_SIGNING_MARKER}
     signingConfigs {
         val keystorePropertiesFile = rootProject.file("keystore.properties")
         if (keystorePropertiesFile.exists()) {
@@ -173,15 +190,53 @@ const SIGNING_CONFIG_BLOCK = `    ${SIGNING_MARKER}
         }
     }
 `;
-
-const RELEASE_SIGNING_BLOCK = `            ${SIGNING_MARKER} (release buildType)
+const LEGACY_RELEASE_SIGNING_BLOCK = `            ${LEGACY_SIGNING_MARKER} (release buildType)
             val keystorePropertiesFile = rootProject.file("keystore.properties")
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
 `;
 
-/** Wire keystore.properties into the generated Gradle build (idempotent). */
+// rootProject = src-tauri/gen/android, so ../../.. is the repository root.
+const SIGNING_CONFIG_BLOCK = `    ${SIGNING_MARKER}
+    signingConfigs {
+        val keystorePropertiesFile = rootProject.file("keystore.properties")
+        val committedKeystore = rootProject.file("../../../signing/qorvyna-upload.jks")
+        val committedPassword = rootProject.file("../../../signing/keystore-password.txt")
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                val keystoreProperties = Properties()
+                keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        } else if (committedKeystore.exists() && committedPassword.exists()) {
+            create("release") {
+                val password = committedPassword.readText().trim()
+                keyAlias = "qorvyna"
+                keyPassword = password
+                storeFile = committedKeystore
+                storePassword = password
+            }
+        }
+    }
+`;
+
+const buildTypeSigningBlock = (type) => `            ${SIGNING_MARKER} (${type} buildType)
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+`;
+
+/** Insert `block` right after the line matching `regex` (must match once). */
+function insertAfter(source, regex, block, what) {
+  const match = regex.exec(source);
+  if (!match) throw new Error(`[android] app/build.gradle.kts has no ${what} block; refusing to guess.`);
+  const at = match.index + match[0].length;
+  return `${source.slice(0, at)}${block}${source.slice(at)}`;
+}
+
+/** Wire one signing identity into the generated Gradle build (idempotent). */
 async function patchGradleSigning() {
   const gradleFile = path.join(GEN, "app/build.gradle.kts");
   if (!(await exists(gradleFile))) {
@@ -190,16 +245,23 @@ async function patchGradleSigning() {
   }
   let gradle = await readFile(gradleFile, "utf8");
   if (gradle.includes(SIGNING_MARKER)) {
-    console.log("[android] Gradle release signing already wired.");
+    console.log("[android] Gradle app signing already wired.");
     return false;
   }
-  const androidBlock = /^android \{[^\S\n]*\n/m.exec(gradle);
-  if (!androidBlock) throw new Error("[android] app/build.gradle.kts has no `android {` block; refusing to guess.");
-  gradle = `${gradle.slice(0, androidBlock.index + androidBlock[0].length)}${SIGNING_CONFIG_BLOCK}${gradle.slice(androidBlock.index + androidBlock[0].length)}`;
+  if (gradle.includes(LEGACY_SIGNING_MARKER)) {
+    gradle = gradle.replace(LEGACY_SIGNING_CONFIG_BLOCK, "").replace(LEGACY_RELEASE_SIGNING_BLOCK, "");
+    if (gradle.includes(LEGACY_SIGNING_MARKER)) {
+      throw new Error(
+        "[android] app/build.gradle.kts has a hand-edited legacy signing block; refusing to guess. " +
+          "Delete src-tauri/gen/android and re-run the build to regenerate it.",
+      );
+    }
+    console.log("[android] Upgrading the previous release-only signing patch.");
+  }
 
-  const releaseBlock = /^[ \t]*getByName\("release"\) \{[^\S\n]*\n/m.exec(gradle);
-  if (!releaseBlock) throw new Error('[android] app/build.gradle.kts has no `getByName("release")` block; refusing to guess.');
-  gradle = `${gradle.slice(0, releaseBlock.index + releaseBlock[0].length)}${RELEASE_SIGNING_BLOCK}${gradle.slice(releaseBlock.index + releaseBlock[0].length)}`;
+  gradle = insertAfter(gradle, /^android \{[^\S\n]*\n/m, SIGNING_CONFIG_BLOCK, "`android {`");
+  gradle = insertAfter(gradle, /^[ \t]*getByName\("debug"\) \{[^\S\n]*\n/m, buildTypeSigningBlock("debug"), '`getByName("debug")`');
+  gradle = insertAfter(gradle, /^[ \t]*getByName\("release"\) \{[^\S\n]*\n/m, buildTypeSigningBlock("release"), '`getByName("release")`');
 
   await writeFile(gradleFile, gradle, "utf8");
   return true;
@@ -235,7 +297,7 @@ async function main() {
 
   if (!changed) {
     console.log(
-      "[android] Notification listener, assistant service/activity, Kotlin sources and release signing are " +
+      "[android] Notification listener, assistant service/activity, Kotlin sources and app signing are " +
         "already in place — nothing to do.",
     );
   } else {
@@ -245,7 +307,7 @@ async function main() {
     if (assistant.changed) {
       console.log("[android] Declared QorvynaAssistantService and AssistActivity (ASSIST role).");
     }
-    if (gradleSigned) console.log("[android] Wired release signing from keystore.properties (when present).");
+    if (gradleSigned) console.log("[android] Wired one app-signing key into the debug + release builds.");
   }
 
   console.log(

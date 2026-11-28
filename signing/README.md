@@ -10,6 +10,17 @@ same identity and installs can update in place.
 | `keystore-password.txt` | Keystore + key password (same value). |
 | `keystore.properties` | **Generated in CI only** — never commit it. |
 
+## Every build uses this key
+
+`scripts/native/patch-android-manifest.mjs` attaches this key to **both** the
+debug and release buildTypes of the generated Gradle project. It uses
+`keystore.properties` when present, otherwise this committed keystore. Local
+`--debug` builds, local release builds and CI builds therefore all share one
+certificate and can update each other in place. Android rejects an APK signed
+with a different certificate: *"App not installed as package conflicts with an
+existing package"*. If a phone still has an older copy signed with a machine
+debug key, uninstall it once. Later installs then update in place.
+
 ## Keystore fingerprints (add these in the Firebase console)
 
 ```

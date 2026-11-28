@@ -7,11 +7,13 @@
 # one on GitHub's servers on every push to `main` (and on app-related PRs, and
 # on demand from the Actions tab) and uploads it as a downloadable artifact.
 #
-# The APK is DEBUG-SIGNED on purpose: it installs on any device with no
-# keystore management. For a store release, build + sign a release APK locally
-# (app_build_guide.md § "Signing (release)" / WINDOWS_BUILD_GUIDE.md §8).
+# Every APK is signed with the ONE QORVYNA key (signing/README.md) — never a
+# runner-generated debug key — so each new APK installs as an in-place update
+# of the previous one instead of failing with "App not installed as package
+# conflicts with an existing package". The build fails before publishing if
+# the APK carries any other certificate.
 #
-# It runs the exact same command a developer runs locally: `npm run android:apk`.
+# It runs the same command a developer runs locally: `npm run android:apk:release`.
 # =============================================================================
 
 name: Android APK build
@@ -173,18 +175,48 @@ jobs:
       # Actions artifacts.
       - name: Prepare the public release assets
         run: |
+          # Failures are reported as annotations (readable without signing in);
+          # an unexpected error reports the exact failing command.
+          fail() {
+            local m="$*"
+            m="${m//'%'/%25}"; m="${m//$'\r'/%0D}"; m="${m//$'\n'/%0A}"
+            echo "::error title=APK signing check::$m"
+            exit 1
+          }
+          trap 'fail "unexpected error at line $LINENO: $BASH_COMMAND"' ERR
+          NL=$'\n'
           UNIVERSAL=$(find src-tauri/gen/android/app/build/outputs/apk -name "app-universal-release.apk" -type f | head -n 1)
           if [ -z "$UNIVERSAL" ]; then
             UNIVERSAL=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" -type f | sort | tail -n 1)
           fi
           if [ -z "$UNIVERSAL" ]; then
-            echo "No release APK found"; exit 1
+            fail "No release APK found"
           fi
           mkdir -p release-assets
           cp "$UNIVERSAL" release-assets/QORVYNA-AI-android.apk
           # Verify the APK is really signed before publishing it.
           TOOL=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
-          "$TOOL/apksigner" verify --print-certs "$UNIVERSAL" | head -4 || { echo "APK signature verification FAILED"; exit 1; }
+          CERTS=$("$TOOL/apksigner" verify --print-certs "$UNIVERSAL" 2>&1) || fail "APK signature verification FAILED:${NL}$(grep -v "^WARNING" <<< "$CERTS" | tail -n 15)"
+          # (apksigner may also print WARNING lines; show only the certificates.)
+          grep "certificate" <<< "$CERTS" || true
+          # ...and signed with the configured QORVYNA key. An APK signed with any
+          # other certificate (e.g. a runner debug key) cannot update installed
+          # copies — Android rejects it with "package conflicts with an existing
+          # package" — so refuse to publish it.
+          prop() { sed -n "s/^$1=//p" signing/keystore.properties; }
+          KEYINFO=$(keytool -list -v -keystore "$(prop storeFile)" -alias "$(prop keyAlias)" -storepass "$(prop storePassword)" 2>&1) \
+            || fail "keytool could not read the signing keystore:${NL}$(tail -n 5 <<< "$KEYINFO")"
+          EXPECTED=$(sed -n "s/^[[:space:]]*SHA256: *//p" <<< "$KEYINFO" | tr -d ": " | tr "[:upper:]" "[:lower:]")
+          # Signer labels differ by apksigner version ("Signer #1 certificate …",
+          # "V2 Signer: certificate …"); every signer listed must be the QORVYNA key.
+          DIGESTS=$(sed -n "s/^.*certificate SHA-256 digest: *//p" <<< "$CERTS" | tr -d ": " | tr "[:upper:]" "[:lower:]" | sort -u)
+          ACTUAL=$(sed -n 1p <<< "$DIGESTS")
+          echo "Expected signer SHA-256: $EXPECTED"
+          echo "APK signer SHA-256:      $ACTUAL"
+          if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$DIGESTS" ]; then
+            fail "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update).${NL}expected: $EXPECTED${NL}actual:   ${DIGESTS//$NL/ }${NL}apksigner $("$TOOL/apksigner" version 2>&1 || true) ($TOOL), $(wc -l <<< "$CERTS") output lines:${NL}$(grep -v "^WARNING" <<< "$CERTS" | sed -n 1,25p)"
+          fi
+          echo "::notice title=APK signer::$ACTUAL (QORVYNA release key)"
           sha256sum release-assets/QORVYNA-AI-android.apk > release-assets/QORVYNA-AI-android.apk.sha256
           ls -lh release-assets
 
@@ -203,6 +235,10 @@ jobs:
             - Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under settings → Assistant.
             - “Continue with Google” works in the app; the Firebase config is baked in.
             - Per-ABI debug variants remain available as the **QORVYNA-AI-APK** build artifact.
+            - Every build is signed with the same QORVYNA key, so new versions install as updates.
+              If Android says *"App not installed as package conflicts with an existing package"*,
+              the phone still has an older copy signed with a different (debug) key: uninstall
+              QORVYNA AI once, then install this APK — later updates install in place.
           files: |
             release-assets/QORVYNA-AI-android.apk
             release-assets/QORVYNA-AI-android.apk.sha256
@@ -227,6 +263,7 @@ jobs:
             echo "(also on the [Releases page](https://github.com/dmoshiur/qorvyna-ai/releases/latest) as \`apk-latest\`)."
             echo ""
             echo "- Signed release build (universal: arm64 / armv7 / x86_64) — installs and updates in place."
+            echo "- \"Package conflicts with an existing package\"? An older, differently-signed copy is installed: uninstall it once, then install."
             echo "- Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under settings → Assistant."
             echo "- Firebase (Continue with Google) is baked into the bundle from google-services.json."
           } >> "$GITHUB_STEP_SUMMARY"

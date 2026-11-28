@@ -2,6 +2,13 @@
 
 Notable changes to QORVYNA. Newest first.
 
+## Android APK: fix "package conflicts with an existing package"
+
+- Root cause: the Tauri-generated Gradle build had no signing for debug builds, so each debug APK (the earlier CI builds and `npm run android:apk`) was signed with whatever random `debug.keystore` that machine or CI runner had generated. The signed release APK uses the QORVYNA key, and Android refuses to replace an installed app with one signed by a different certificate.
+- `patch-android-manifest.mjs` now signs **both** debug and release builds with one key: `keystore.properties` when present (CI / repository secrets), otherwise the committed `signing/qorvyna-upload.jks`. Projects patched by the old release-only block are upgraded in place. Every build path (npm scripts, PowerShell scripts, CI) gets this, so new APKs install as in-place updates.
+- CI now refuses to publish an APK whose signer is not the configured key.
+- One-time step: a phone that still has an older debug-signed copy must uninstall it once. Android has no way to update across different signing certificates. After that, updates install in place.
+
 ## Admin provider accounts and custom models
 
 - The admin AI configuration "Providers & models" panel now manages credentials for multiple providers. Multiple Groq keys keep their live rate-limit rotation display, and OpenAI (ChatGPT), Anthropic (Claude), Google (Gemini) and any OpenAI-compatible endpoint can be connected from the same panel.
