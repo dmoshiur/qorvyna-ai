@@ -175,37 +175,46 @@ jobs:
       # Actions artifacts.
       - name: Prepare the public release assets
         run: |
-          # Also append to the build log: the PR failure comment posts its tail.
-          exec > >(tee -a "$RUNNER_TEMP/build.log") 2>&1
+          # Failures are reported as annotations (readable without signing in);
+          # an unexpected error reports the exact failing command.
+          fail() {
+            local m="$*"
+            m="${m//'%'/%25}"; m="${m//$'\r'/%0D}"; m="${m//$'\n'/%0A}"
+            echo "::error title=APK signing check::$m"
+            exit 1
+          }
+          trap 'fail "unexpected error at line $LINENO: $BASH_COMMAND"' ERR
+          NL=$'\n'
           UNIVERSAL=$(find src-tauri/gen/android/app/build/outputs/apk -name "app-universal-release.apk" -type f | head -n 1)
           if [ -z "$UNIVERSAL" ]; then
             UNIVERSAL=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" -type f | sort | tail -n 1)
           fi
           if [ -z "$UNIVERSAL" ]; then
-            echo "No release APK found"; exit 1
+            fail "No release APK found"
           fi
           mkdir -p release-assets
           cp "$UNIVERSAL" release-assets/QORVYNA-AI-android.apk
           # Verify the APK is really signed before publishing it.
           TOOL=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
-          CERTS=$("$TOOL/apksigner" verify --print-certs "$UNIVERSAL" 2>&1) || { echo "$CERTS" | tail -n 20; echo "APK signature verification FAILED"; exit 1; }
+          CERTS=$("$TOOL/apksigner" verify --print-certs "$UNIVERSAL" 2>&1) || fail "APK signature verification FAILED:${NL}$(grep -v "^WARNING" <<< "$CERTS" | tail -n 15)"
           # (apksigner also prints one WARNING line per unsigned META-INF entry;
           # grep reads it all, so no early-closing pipe can trip pipefail.)
-          grep "^Signer #" <<< "$CERTS" || true
+          grep "^Signer" <<< "$CERTS" || true
           # ...and signed with the configured QORVYNA key. An APK signed with any
           # other certificate (e.g. a runner debug key) cannot update installed
           # copies — Android rejects it with "package conflicts with an existing
           # package" — so refuse to publish it.
           prop() { sed -n "s/^$1=//p" signing/keystore.properties; }
           KEYINFO=$(keytool -list -v -keystore "$(prop storeFile)" -alias "$(prop keyAlias)" -storepass "$(prop storePassword)" 2>&1) \
-            || { echo "$KEYINFO" | tail -n 5; echo "keytool could not read the signing keystore"; exit 1; }
+            || fail "keytool could not read the signing keystore:${NL}$(tail -n 5 <<< "$KEYINFO")"
           EXPECTED=$(sed -n "s/^[[:space:]]*SHA256: *//p" <<< "$KEYINFO" | tr -d ": " | tr "[:upper:]" "[:lower:]")
-          ACTUAL=$(sed -n "s/^Signer #1 certificate SHA-256 digest: *//p" <<< "$CERTS" | tr -d ": " | tr "[:upper:]" "[:lower:]")
+          ACTUAL=$(sed -n "s/^Signer[^:]* certificate SHA-256 digest: *//p" <<< "$CERTS" | sed -n 1p | tr -d ": " | tr "[:upper:]" "[:lower:]")
           echo "Expected signer SHA-256: $EXPECTED"
           echo "APK signer SHA-256:      $ACTUAL"
           if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-            echo "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update)."; exit 1
+            fail "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update).${NL}expected: $EXPECTED${NL}actual:   $ACTUAL${NL}$(grep '^Signer' <<< "$CERTS" || true)"
           fi
+          echo "::notice title=APK signer::$ACTUAL (QORVYNA release key)"
           sha256sum release-assets/QORVYNA-AI-android.apk > release-assets/QORVYNA-AI-android.apk.sha256
           ls -lh release-assets
 

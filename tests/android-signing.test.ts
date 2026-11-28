@@ -135,7 +135,7 @@ describe("Android APK signing — one certificate for every build", () => {
 
   it("CI refuses to publish an APK signed with any other certificate", () => {
     const workflow = readFileSync(path.join(ROOT, ".github/workflows/android-apk.yml"), "utf8");
-    expect(workflow).toContain("Signer #1 certificate SHA-256 digest");
+    expect(workflow).toContain("certificate SHA-256 digest");
     expect(workflow).toContain("refusing to publish");
   });
 });
