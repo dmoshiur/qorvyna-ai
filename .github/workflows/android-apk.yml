@@ -73,6 +73,19 @@ jobs:
       - name: Accept Android SDK licences
         run: yes | sdkmanager --licenses > /dev/null || true
 
+      # The runner image sets ANDROID_NDK_HOME; Tauri's Android toolchain wants
+      # NDK_HOME, so point it at the same preinstalled NDK explicitly.
+      - name: Resolve the Android NDK path
+        run: |
+          if [ -z "$NDK_HOME" ]; then
+            NDK="$ANDROID_NDK_HOME"
+            if [ -z "$NDK" ]; then
+              NDK="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -n 1)"
+            fi
+            echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
+            echo "Using NDK: $NDK"
+          fi
+
       - name: Set up Rust with the Android cross-compile targets
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -91,7 +104,21 @@ jobs:
       # wake-word plugin, notification listener), then builds a debug-signed
       # installable APK — the identical command documented for local builds.
       - name: Build the APK
-        run: npm run android:apk
+        run: |
+          npm run android:apk 2>&1 | tee "$RUNNER_TEMP/build.log"
+          exit "${PIPESTATUS[0]}"
+
+      # GitHub now requires sign-in to view raw logs; the step summary is
+      # public, so on failure publish the tail there where it is readable.
+      - name: Publish the build log tail on failure
+        if: failure()
+        run: |
+          {
+            echo "### Android APK build — log tail"
+            echo '```'
+            tail -n 250 "$RUNNER_TEMP/build.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: List the produced APKs
         run: |
