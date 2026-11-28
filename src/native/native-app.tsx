@@ -23,7 +23,7 @@
 // the webview can hold one.
 // =============================================================================
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeft, CheckCircle2, ChevronRight, Loader2, Mic, RefreshCw, XCircle } from "lucide-react";
 import { AuthShell, AuthUnavailable, LoginForm } from "@/components/auth/login-screen";
 import { AppShell } from "@/components/app-shell";
@@ -243,7 +243,64 @@ function NativeGate() {
     return <NativeSplash label="Restoring your QORVYNA session…" />;
   }
 
-  return <NativeWorkspace />;
+  return (
+    <NativeErrorBoundary scope="app">
+      <NativeWorkspace />
+    </NativeErrorBoundary>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Error boundary — one failing component must never blank the whole app.
+// Without it, any render error (e.g. a reply missing a field) unmounts the
+// entire React tree and leaves an empty background. `screen` boundaries reset
+// when the route changes; the `app` boundary offers a reload.
+// ---------------------------------------------------------------------------
+
+class NativeErrorBoundary extends Component<
+  { scope: "app" | "screen"; resetKey?: string; children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(`[QORVYNA] ${this.props.scope} render error:`, error, info.componentStack);
+  }
+
+  componentDidUpdate(previous: { resetKey?: string }) {
+    if (this.state.error && previous.resetKey !== this.props.resetKey) this.setState({ error: null });
+  }
+
+  render() {
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    const content = (
+      <Card className="max-w-sm p-6 text-center">
+        <AlertTriangle className="mx-auto h-6 w-6 text-ink-2" aria-hidden="true" />
+        <h1 className="mt-2 text-base font-semibold text-ink">
+          {this.props.scope === "app" ? "QORVYNA hit a problem" : "This screen hit a problem"}
+        </h1>
+        <p className="mt-2 break-words text-[13px] leading-relaxed text-ink-2">{error.message || String(error)}</p>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
+          <Button type="button" onClick={() => this.setState({ error: null })}>
+            Try again
+          </Button>
+          <Button type="button" variant="outline" onClick={() => window.location.reload()}>
+            Reload app
+          </Button>
+        </div>
+      </Card>
+    );
+    return this.props.scope === "app" ? (
+      <div className="flex min-h-dvh items-center justify-center p-6">{content}</div>
+    ) : (
+      <div className="flex flex-1 items-center justify-center p-6">{content}</div>
+    );
+  }
 }
 
 function NativeSplash({ label }: { label: string }) {
@@ -325,7 +382,9 @@ function NativeWorkspace() {
   return (
     <AppShell user={user} conversations={conversations} isAdmin={isAdmin} sidebarError={null} renderedAt={new Date().toISOString()}>
       <div className="flex min-h-0 flex-1 flex-col">
-        <ScreenContent screen={screen} search={search} />
+        <NativeErrorBoundary scope="screen" resetKey={pathname}>
+          <ScreenContent screen={screen} search={search} />
+        </NativeErrorBoundary>
       </div>
       {setupOpen ? <FirstRunSetup onClose={() => setSetupOpen(false)} /> : null}
       <NativeRefreshHint />

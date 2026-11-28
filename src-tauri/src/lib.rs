@@ -370,6 +370,12 @@ pub fn run() {
         // forwarded to the web UI as an app event so the existing router can
         // handle it; the Rust side never opens or executes anything itself.
         .plugin(tauri_plugin_deep_link::init())
+        // Native HTTP for the bundled frontend's `/api/*` calls (see
+        // src/native/api-transport.ts): the app is served from
+        // http://tauri.localhost, so plain fetch() would hit the bundled files
+        // (Tauri answers unknown paths with index.html) and the backend sends no
+        // CORS headers. Scoped to the QORVYNA API origin in capabilities.
+        .plugin(tauri_plugin_http::init())
         // Floating-assistant bridge: an empty plugin on desktop, the Kotlin
         // AssistantPlugin on Android (see src/assistant.rs).
         .plugin(assistant::plugin())
@@ -486,6 +492,7 @@ pub fn run() {
             native::qorvyna_assistant_settings,
             native::qorvyna_wake_word_enrol,
             native::qorvyna_wake_word_clear,
+            native::qorvyna_google_sign_in,
             native::qorvyna_device_fingerprint,
             native::qorvyna_inspection_state,
             native::qorvyna_inspection_stop

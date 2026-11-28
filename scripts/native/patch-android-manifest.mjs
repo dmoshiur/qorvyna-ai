@@ -267,6 +267,57 @@ async function patchGradleSigning() {
   return true;
 }
 
+// -----------------------------------------------------------------------------
+// Native Google sign-in (QorvynaGoogleSignIn.kt) needs Android Credential
+// Manager + the Google ID library + coroutines in the app module, and R8 must
+// keep the Play Services credential provider, which Credential Manager loads by
+// reflection (stripped in release builds otherwise). Idempotent: marker-guarded
+// dependency block; the rules file is rewritten only when it differs.
+// -----------------------------------------------------------------------------
+const DEPENDENCY_MARKER = "// QORVYNA native Google sign-in (patch-android-manifest.mjs)";
+const DEPENDENCY_BLOCK = `    ${DEPENDENCY_MARKER}
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+`;
+const CREDENTIAL_RULES_FILE = "qorvyna-credentials.pro";
+const CREDENTIAL_RULES = `# QORVYNA native Google sign-in (written by scripts/native/patch-android-manifest.mjs).
+# Credential Manager instantiates the Play Services provider by reflection.
+-if class androidx.credentials.CredentialManager
+-keep class androidx.credentials.playservices.** {
+  *;
+}
+`;
+
+/** Add the Credential Manager dependencies + R8 rules (idempotent). */
+async function patchGoogleSignInDependencies() {
+  const gradleFile = path.join(GEN, "app/build.gradle.kts");
+  if (!(await exists(gradleFile))) {
+    console.log("[android] app/build.gradle.kts not found — skipping Google sign-in dependencies.");
+    return false;
+  }
+  let changed = false;
+  const gradle = await readFile(gradleFile, "utf8");
+  if (!gradle.includes(DEPENDENCY_MARKER)) {
+    const block = /^dependencies \{[^\S\n]*\n/m.exec(gradle);
+    const patched = block
+      ? `${gradle.slice(0, block.index + block[0].length)}${DEPENDENCY_BLOCK}${gradle.slice(block.index + block[0].length)}`
+      : // Gradle merges multiple `dependencies {}` blocks.
+        `${gradle.replace(/\s*$/, "\n")}\ndependencies {\n${DEPENDENCY_BLOCK}}\n`;
+    await writeFile(gradleFile, patched, "utf8");
+    changed = true;
+  }
+  // The template's release buildType applies every **/*.pro under app/.
+  const rulesFile = path.join(GEN, "app", CREDENTIAL_RULES_FILE);
+  const current = (await exists(rulesFile)) ? await readFile(rulesFile, "utf8") : null;
+  if (current !== CREDENTIAL_RULES) {
+    await writeFile(rulesFile, CREDENTIAL_RULES, "utf8");
+    changed = true;
+  }
+  return changed;
+}
+
 async function main() {
   if (!(await exists(MANIFEST))) {
     console.error(
@@ -278,6 +329,7 @@ async function main() {
 
   const copied = await syncKotlin();
   const gradleSigned = await patchGradleSigning();
+  const googleSignIn = await patchGoogleSignInDependencies();
 
   const original = await readFile(MANIFEST, "utf8");
   const permissions = declarePermissions(original);
@@ -291,6 +343,7 @@ async function main() {
   const changed =
     copied.length > 0 ||
     gradleSigned ||
+    googleSignIn ||
     permissions.added.length > 0 ||
     notification.changed ||
     assistant.changed;
@@ -308,6 +361,7 @@ async function main() {
       console.log("[android] Declared QorvynaAssistantService and AssistActivity (ASSIST role).");
     }
     if (gradleSigned) console.log("[android] Wired one app-signing key into the debug + release builds.");
+    if (googleSignIn) console.log("[android] Added Credential Manager (native Google sign-in) dependencies + R8 rules.");
   }
 
   console.log(

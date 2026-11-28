@@ -96,6 +96,43 @@ const FIREBASE_PUBLIC_CONFIG = Object.fromEntries(
 const firebaseConfigSource = FIREBASE_KEYS.every((key) => String(fromEnv[key] || "").trim()) ? "environment" : "google-services.json";
 console.log(`[native] firebase: project ${FIREBASE_PUBLIC_CONFIG.projectId} (from ${firebaseConfigSource})`);
 
+// Native Google sign-in (Android Credential Manager) needs the project's Web
+// OAuth client ID — the audience of the Google ID token Firebase accepts. It is
+// a public identifier (client_type 3 in google-services.json).
+function googleWebClientId() {
+  const fromEnvValue = String(process.env.NEXT_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? "").trim();
+  if (fromEnvValue) return fromEnvValue;
+  const file = join(root, "google-services.json");
+  if (!existsSync(file)) return "";
+  const gs = JSON.parse(readFileSync(file, "utf8"));
+  for (const client of gs.client || []) {
+    const web = (client.oauth_client || []).find((entry) => entry.client_type === 3);
+    if (web?.client_id) return web.client_id;
+  }
+  return "";
+}
+const GOOGLE_WEB_CLIENT_ID = googleWebClientId();
+console.log(
+  GOOGLE_WEB_CLIENT_ID
+    ? `[native] google sign-in: web client ${GOOGLE_WEB_CLIENT_ID.split("-")[0]}-… (native account picker enabled)`
+    : "[native] google sign-in: no Web OAuth client ID — the app falls back to the browser flow",
+);
+
+// The app reaches the backend through Tauri's HTTP plugin, whose scope lives
+// in src-tauri/capabilities/default.json. A bundle pointed at an origin
+// outside that scope would fail every API call — refuse to build it.
+{
+  const capability = JSON.parse(readFileSync(join(root, "src-tauri", "capabilities", "default.json"), "utf8"));
+  const http = capability.permissions.find((entry) => typeof entry === "object" && entry.identifier === "http:default");
+  const allowed = (http?.allow ?? []).map((entry) => String(entry.url ?? ""));
+  if (!allowed.some((pattern) => pattern === `${API_ORIGIN}/*`)) {
+    fail(
+      `API origin ${API_ORIGIN} is not in the HTTP scope of src-tauri/capabilities/default.json (${allowed.join(", ") || "none"}). ` +
+        `Add { "url": "${API_ORIGIN}/*" } to the "http:default" permission.`,
+    );
+  }
+}
+
 /** Every NEXT_PUBLIC_* variable the shared source reads — all must be defined. */
 function nextPublicNamesInSource() {
   const names = new Set(["NEXT_PUBLIC_QORVYNA_NATIVE"]);
@@ -122,6 +159,7 @@ function publicDefines() {
     defines.set("process.env." + firebaseEnvName(key), JSON.stringify(value));
   }
   defines.set("process.env.NEXT_PUBLIC_APP_URL", JSON.stringify(API_ORIGIN));
+  defines.set("process.env.NEXT_PUBLIC_GOOGLE_WEB_CLIENT_ID", JSON.stringify(GOOGLE_WEB_CLIENT_ID));
   for (const name of nextPublicNamesInSource()) {
     if (!defines.has(`process.env.${name}`)) defines.set(`process.env.${name}`, '""');
   }

@@ -20,6 +20,9 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-deep-link = "2"
+# `unsafe-headers`: lets the app omit the Origin header so the backend treats
+# app requests like its other bearer-token clients (src/lib/server/request-security.ts).
+tauri-plugin-http = { version = "2.9", features = ["unsafe-headers"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.33"

@@ -2,6 +2,13 @@
 
 Notable changes to QORVYNA. Newest first.
 
+## Android app: native Google sign-in, and no blank screen after signing in
+
+- Blank screen after signing in. The app is served from `http://tauri.localhost`, so the shared frontend's relative `/api/*` calls never reached the backend: Tauri answered them with the bundled `index.html`. The family mirror banner then read a field of that reply, threw, and with no error boundary the whole screen unmounted. Backend calls now go through Tauri's HTTP plugin (`src/native/api-transport.ts`, scoped to the backend origin in `src-tauri/capabilities/default.json`). Like the server's other native clients, these requests carry no `Origin` and send the signed-in user's Firebase ID token as a Bearer token. The website is unchanged.
+- The mirror banner ignores malformed replies. The app shell has error boundaries around the whole workspace and around each screen, so one failing component shows a "Try again / Reload app" card instead of a blank screen.
+- "Continue with Google" in the Android app now opens the phone's own Google account sheet (Android Credential Manager, `QorvynaGoogleSignIn.kt`) instead of a detached browser window that couldn't see the device's accounts. The returned Google ID token signs in to the same Firebase user (`signInWithCredential`); account linking uses the same sheet. The bundle gets the project's Web OAuth client ID from `google-services.json` (or `NEXT_PUBLIC_GOOGLE_WEB_CLIENT_ID`), and the Android build adds the Credential Manager libraries and R8 keep rules.
+- One-time setup step: Google only issues the token to an app whose signing SHA-1 is registered in Firebase. Add the release key's SHA-1 and SHA-256 (see `signing/README.md`) to the `ai.matrix.desktop` Android app in the Firebase console. Until then, the app explains why Google sign-in is unavailable, and email/password sign-in keeps working.
+
 ## Android app: fix the blank white screen on launch
 
 - Root cause 1: the app bundle compiled `next/navigation`, `next/link` and `next/image` as Next.js's real runtime. That code reads `process.env.__NEXT_*`, which doesn't exist in a WebView, so the bundle threw `process is not defined` on boot and rendered nothing. The bundler now aliases those imports to the native shell's own replacements (`src/native/router.tsx`, `src/native/next-image.tsx`).

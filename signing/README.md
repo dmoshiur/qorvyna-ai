@@ -32,6 +32,14 @@ Firebase console → Project settings → Your apps → **ai.matrix.desktop**
 → Add fingerprint — paste both. This lets Firebase's native app checks
  recognise updates signed with this key.
 
+**Required for "Continue with Google" in the app.** The Android app signs in
+with the phone's own Google account sheet (Credential Manager). Google only
+issues the sign-in token to an app whose package name + signing SHA-1 are
+registered in the Firebase project, so until these fingerprints are added the
+app shows "Google did not accept the app's signing certificate" (developer
+error 10 / 28444) and email/password sign-in remains available. No new build
+is needed after adding them; Google picks up the change within minutes.
+
 ## Security note
 
 This is a **debug-grade** distribution key committed so the public CI build can

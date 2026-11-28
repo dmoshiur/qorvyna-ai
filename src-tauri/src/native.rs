@@ -304,6 +304,17 @@ pub fn qorvyna_wake_word_enrol() -> Result<serde_json::Value, String> {
     crate::assistant::enrol_wake_word()
 }
 
+/// Native "Continue with Google" (Android): shows the system sheet with the
+/// device's Google accounts and returns `{ idToken, email, displayName }`.
+/// `async` + `spawn_blocking`: the picker needs the Android main thread, which
+/// a synchronous command would block while waiting for the answer.
+#[tauri::command]
+pub async fn qorvyna_google_sign_in(web_client_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::assistant::google_sign_in(&web_client_id))
+        .await
+        .map_err(|error| format!("GOOGLE_FAILED: {error}"))?
+}
+
 /// Delete every enrolled wake-phrase sample from this device.
 #[tauri::command]
 pub fn qorvyna_wake_word_clear() -> Result<serde_json::Value, String> {

@@ -28,8 +28,10 @@
 import {
   GoogleAuthProvider,
   getAdditionalUserInfo,
+  linkWithCredential,
   linkWithPopup,
   linkWithRedirect,
+  signInWithCredential,
   signInWithPopup,
   signInWithRedirect,
   type Auth,
@@ -180,6 +182,126 @@ export function isQorvynaWebView(): boolean {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Android app: native Google account picker
+//
+// Google refuses its OAuth pages inside an embedded WebView, so in the Android
+// app the popup/redirect flow opened a detached window that never listed the
+// phone's Google accounts. There, sign-in uses Android Credential Manager
+// instead (Kotlin QorvynaGoogleSignIn via the `qorvyna_google_sign_in`
+// command): the system sheet with the device's accounts returns a Google ID
+// token, which Firebase turns into the same user as on the website.
+// -----------------------------------------------------------------------------
+
+/** Web OAuth client the ID token is issued for (baked into the app bundle). */
+const GOOGLE_WEB_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? "";
+
+const NATIVE_GOOGLE_NOT_REGISTERED =
+  "Google sign-in isn't available in this app build yet: Google did not accept the app's signing certificate. " +
+  "An administrator must add the app's SHA-1 / SHA-256 fingerprints to the Android app in the Firebase console " +
+  "(see signing/README.md). You can sign in with email and password meanwhile.";
+
+/** True in the Android app shell when the native picker can be used. */
+export function canUseNativeGoogleSignIn(): boolean {
+  if (!isQorvynaWebView() || !GOOGLE_WEB_CLIENT_ID) return false;
+  try {
+    return /Android/i.test(navigator.userAgent);
+  } catch {
+    return false;
+  }
+}
+
+type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+/** Show the native account sheet; resolves the Google ID token. Errors carry `native/<CODE>`. */
+async function nativeGoogleIdToken(): Promise<string> {
+  const host = window as typeof window & {
+    __TAURI_INTERNALS__?: { invoke?: TauriInvoke };
+    __TAURI__?: { core?: { invoke?: TauriInvoke } };
+  };
+  const invoke = host.__TAURI_INTERNALS__?.invoke ?? host.__TAURI__?.core?.invoke;
+  const fail = (code: string, message: string) => Object.assign(new Error(message), { code: `native/${code}` });
+  if (!invoke) throw fail("GOOGLE_FAILED", "The app bridge is not available.");
+  let result: unknown;
+  try {
+    result = await invoke("qorvyna_google_sign_in", { webClientId: GOOGLE_WEB_CLIENT_ID });
+  } catch (err) {
+    // Rust returns Kotlin rejections as "...[CODE] - message".
+    const text = typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
+    const code = /\[(CANCELLED|NO_ACCOUNT|GOOGLE_FAILED)\]/.exec(text)?.[1] ?? "GOOGLE_FAILED";
+    throw fail(code, text);
+  }
+  const idToken = (result as { idToken?: unknown } | null)?.idToken;
+  if (typeof idToken !== "string" || !idToken) throw fail("GOOGLE_FAILED", "Google did not return an ID token.");
+  return idToken;
+}
+
+/** User-facing text for a native Google sign-in failure. */
+export function describeNativeGoogleFailure(err: unknown): string {
+  const code = errorCode(err);
+  const text = errorText(err);
+  if (code === "native/CANCELLED") return "Google sign-in was cancelled.";
+  if (code === "native/NO_ACCOUNT" || text.includes("28444") || text.includes("developer console")) {
+    return code === "native/NO_ACCOUNT"
+      ? "No Google account could be used. Add one in Android Settings → Accounts. If your accounts are already there: " +
+          NATIVE_GOOGLE_NOT_REGISTERED.charAt(0).toLowerCase() +
+          NATIVE_GOOGLE_NOT_REGISTERED.slice(1)
+      : NATIVE_GOOGLE_NOT_REGISTERED;
+  }
+  if (code.startsWith("native/")) {
+    const detail = err instanceof Error ? err.message : "";
+    return `Google sign-in failed on this device${detail ? ` (${detail})` : ""}. You can sign in with email and password meanwhile.`;
+  }
+  return describeOAuthFailure(err, "google");
+}
+
+async function startNativeGoogleSignIn(auth: Auth, provider: OAuthProviderId): Promise<OAuthResult> {
+  let cred: UserCredential;
+  try {
+    const idToken = await nativeGoogleIdToken();
+    cred = await signInWithCredential(auth, GoogleAuthProvider.credential(idToken));
+  } catch (err) {
+    const cancelled = errorCode(err) === "native/CANCELLED";
+    logAuthEvent(cancelled ? "POPUP_SIGN_IN_COMPLETED" : "AUTH_POPUP_ERROR", {
+      stage: "popup-result",
+      method: "google",
+      provider,
+      error: err,
+      detail: { outcome: cancelled ? "cancelled" : "failed", transport: "android-credential-manager" },
+    });
+    return cancelled
+      ? { status: "cancelled", message: describeNativeGoogleFailure(err), provider }
+      : { status: "error", message: describeNativeGoogleFailure(err), provider };
+  }
+  logAuthEvent("POPUP_SIGN_IN_COMPLETED", {
+    stage: "popup-result",
+    method: "google",
+    provider,
+    detail: { outcome: "credential_received", transport: "android-credential-manager", hasUser: Boolean(cred.user?.uid) },
+  });
+  await confirmSharedAuthState(auth, cred.user.uid);
+  return finishSignIn(cred, provider);
+}
+
+async function startNativeGoogleLink(user: User, provider: OAuthProviderId): Promise<OAuthResult> {
+  let cred: UserCredential;
+  try {
+    cred = await linkWithCredential(user, GoogleAuthProvider.credential(await nativeGoogleIdToken()));
+  } catch (err) {
+    const cancelled = errorCode(err) === "native/CANCELLED";
+    logAuthEvent("AUTH_POPUP_ERROR", { stage: "link-result", method: "link", provider, error: err });
+    return cancelled
+      ? { status: "cancelled", message: describeNativeGoogleFailure(err), provider }
+      : { status: "error", message: describeNativeGoogleFailure(err), provider };
+  }
+  try {
+    await completeAuthenticatedSession(cred.user, { forceRefresh: true });
+  } catch {
+    /* the link succeeded in Firebase; keep the active session */
+  }
+  return { status: "ok", uid: cred.user.uid, onboardingComplete: true, provider, isNewUser: false, operation: "link" };
+}
+
 function isStorageBlocked(err: unknown): boolean {
   const code = errorCode(err);
   const text = errorText(err);
@@ -322,6 +444,9 @@ export async function startOAuthSignIn(
     detail: { next: options.next ?? "" },
   });
 
+  // Android app: the system account sheet instead of a WebView popup.
+  if (provider === "google" && canUseNativeGoogleSignIn()) return startNativeGoogleSignIn(auth, provider);
+
   let cred: UserCredential;
   try {
     cred = await signInWithPopup(auth, makeProvider(provider));
@@ -414,6 +539,9 @@ export async function startOAuthLink(provider: OAuthProviderId): Promise<OAuthRe
   if (!user) return { status: "error", message: "Sign in first, then link this provider.", provider };
 
   logAuthEvent("POPUP_SIGN_IN_STARTED", { stage: "link-start", method: "link", provider });
+  // Android app: link through the native account sheet as well.
+  if (provider === "google" && canUseNativeGoogleSignIn()) return startNativeGoogleLink(user, provider);
+
   let cred: UserCredential;
   try {
     cred = await linkWithPopup(user, makeProvider(provider));
