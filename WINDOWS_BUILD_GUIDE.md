@@ -368,7 +368,7 @@ If the window cannot be created (headless session, broken GPU context) the
 hotkey falls back to the in-app Jarvis bar instead of doing nothing. The tray
 menu entry "Speak to QORVYNA" also still exists.
 
-The wake phrase ("Hey QORVYNA") is **Android-only** on purpose: a desktop build
+The wake phrase ("Hey AI" / হেই এআই) is **Android-only** on purpose: a desktop build
 does not ship an always-listening model, so the assistant state reports
 `wakeWordSupported: false` there rather than pretending.
 
@@ -377,6 +377,12 @@ does not ship an always-listening model, so the assistant state reports
 ## 7. Android APK build
 
 The Android project does not exist until `tauri android init` generates it.
+
+> **Easier paths:** `npm run android:apk` (one command, debug-signed installable
+> APK) or the GitHub Actions workflow **Android APK build**
+> (`.github/workflows/android-apk.yml`) that builds the APK in CI and uploads it
+> as a downloadable artifact — no local Android toolchain needed. The script
+> below remains the fully-validated local release path.
 
 ### 7.1 One-time initialisation
 
@@ -437,7 +443,7 @@ assumed:
 1. **Floating bubble** — "Allow over other apps" opens the system page
    (`Settings.ACTION_MANAGE_OVERLAY_PERMISSION`), then "Show bubble" starts the
    foreground service. The bubble is draggable; a tap starts a voice turn.
-2. **Wake phrase "Hey QORVYNA"** — press "Record phrase" and say it clearly;
+2. **Wake phrase "Hey AI" (হেই এআই)** — press "Record phrase" and say it clearly;
    the same screen reports `n/2` samples. The engine is on the device
    (`QorvynaWakeWord.kt`: MFCC + banded DTW against the enrolled templates),
    there is no network call and no vendor model to download. Audio is kept in

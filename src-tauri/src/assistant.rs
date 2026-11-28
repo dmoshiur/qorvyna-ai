@@ -123,12 +123,12 @@ pub fn open_main<R: tauri::Runtime>(app: &AppHandle<R>) -> Value {
             let _ = main.set_focus();
             return json!({ "opened": true });
         }
-        json!({ "opened": false, "detail": "The main window is not available." })
+        return json!({ "opened": false, "detail": "The main window is not available." });
     }
     #[cfg(mobile)]
     {
         let _ = app;
-        json!({ "opened": false, "detail": "The main screen is already in the foreground on this platform." })
+        return json!({ "opened": false, "detail": "The main screen is already in the foreground on this platform." });
     }
     #[allow(unreachable_code)]
     json!({ "opened": false })
@@ -147,7 +147,7 @@ pub fn toggle_or_null<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     #[cfg(mobile)]
     {
         let _ = app;
-        false
+        return false;
     }
     #[allow(unreachable_code)]
     false

@@ -1,0 +1,164 @@
+# =============================================================================
+# QORVYNA AI — easy Android APK build (GitHub Actions)
+#
+# Why this exists: the local APK build needs Rust + 4 Android targets, JDK 17,
+# the Android SDK + NDK and several minutes of Gradle. Most of the time nobody
+# wants to set that up just to get an installable APK — so this workflow builds
+# one on GitHub's servers on every push to `main` (and on app-related PRs, and
+# on demand from the Actions tab) and uploads it as a downloadable artifact.
+#
+# The APK is DEBUG-SIGNED on purpose: it installs on any device with no
+# keystore management. For a store release, build + sign a release APK locally
+# (app_build_guide.md § "Signing (release)" / WINDOWS_BUILD_GUIDE.md §8).
+#
+# It runs the exact same command a developer runs locally: `npm run android:apk`.
+# =============================================================================
+
+name: Android APK build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/android-apk.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/android-apk.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Build installable APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # ubuntu-latest already ships the Android SDK (build-tools 34, platform
+      # android-34, NDK 27.x with ANDROID_HOME/ANDROID_NDK_HOME pre-set), so
+      # no setup-android action is needed — only licence acceptance, which
+      # lets Gradle auto-fetch any exact package version it wants.
+      - name: Accept Android SDK licences
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      # The runner image sets ANDROID_NDK_HOME; Tauri's Android toolchain wants
+      # NDK_HOME, so point it at the same preinstalled NDK explicitly.
+      - name: Resolve the Android NDK path
+        run: |
+          if [ -z "$NDK_HOME" ]; then
+            NDK="$ANDROID_NDK_HOME"
+            if [ -z "$NDK" ]; then
+              NDK="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -n 1)"
+            fi
+            echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
+            echo "Using NDK: $NDK"
+          fi
+
+      - name: Set up Rust with the Android cross-compile targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies (exactly as the lockfile pins)
+        run: npm ci --no-audit --no-fund
+
+      # Bundles the frontend into public/native, initializes + patches the
+      # generated Android project when needed (assistant bubble service,
+      # wake-word plugin, notification listener), then builds a debug-signed
+      # installable APK — the identical command documented for local builds.
+      - name: Build the APK
+        run: |
+          npm run android:apk 2>&1 | tee "$RUNNER_TEMP/build.log"
+          exit "${PIPESTATUS[0]}"
+
+      # GitHub now requires sign-in to view raw logs; the step summary is
+      # public, so on failure publish the tail there where it is readable.
+      - name: Publish the build log tail on failure
+        if: failure()
+        run: |
+          {
+            echo "### Android APK build — log tail"
+            echo '```'
+            tail -n 250 "$RUNNER_TEMP/build.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Raw logs need sign-in and summaries are JS-rendered, so also post the
+      # tail as a PR comment where tooling (and the reviewer) can read it.
+      - name: Comment the build log tail on the PR
+        if: failure() && github.event.pull_request.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Android APK build failed — log tail"
+            echo ""
+            echo '```'
+            tail -n 300 "$RUNNER_TEMP/build.log"
+            echo '```'
+          } > /tmp/logtail.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/logtail.md
+
+      - name: List the produced APKs
+        run: |
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -type f -exec ls -lh {} \;
+
+      - name: Upload the APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QORVYNA-AI-APK
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: How to install
+        run: |
+          {
+            echo "## QORVYNA AI APK"
+            echo ""
+            echo "Download the **QORVYNA-AI-APK** artifact above, unzip it, and install"
+            echo "\`app-universal-debug.apk\` on the phone (works on arm64 / armv7 / x86_64)."
+            echo ""
+            echo "- The APK is **debug-signed** for easy installs — uninstall any"
+            echo "  differently-signed previous build before installing."
+            echo "- Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under"
+            echo "  settings → Assistant (record the phrase twice, on-device only)."
+          } >> "$GITHUB_STEP_SUMMARY"

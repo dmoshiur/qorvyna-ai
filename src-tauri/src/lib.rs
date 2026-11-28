@@ -16,11 +16,13 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Command;
 use sysinfo::{ProcessesToUpdate, System};
+use tauri::{AppHandle, Emitter, Manager};
+#[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager,
 };
+#[cfg(desktop)]
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 
@@ -336,7 +338,14 @@ fn trigger_voice_activate(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Desktop-only plugins: the global-shortcut and shell plugins expose no
+    // mobile API at all, so registering them unconditionally breaks the
+    // Android build. On Android the floating bubble + the system ASSIST role
+    // take the hotkey/tray's place.
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -353,8 +362,10 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_shell::init());
+
+    builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_shell::init())
         // Deep links (`qorvyna://link?code=...`, `qorvyna://voice`). The URL is
         // forwarded to the web UI as an app event so the existing router can
         // handle it; the Rust side never opens or executes anything itself.
@@ -363,9 +374,10 @@ pub fn run() {
         // AssistantPlugin on Android (see src/assistant.rs).
         .plugin(assistant::plugin())
         .setup(|app| {
-            let _ = app
-                .global_shortcut()
-                .register("CmdOrCtrl+Shift+Space");
+            // Registering the hotkey is desktop-only: the plugin does not
+            // exist on mobile, and the bubble covers the same entry point.
+            #[cfg(desktop)]
+            let _ = app.global_shortcut().register("CmdOrCtrl+Shift+Space");
 
             // --- Deep links ---------------------------------------------------
             // Two paths matter: a warm app receives `open-url`, a cold start
@@ -400,48 +412,54 @@ pub fn run() {
                 }
             }
 
-            let show_item = MenuItem::with_id(app, "show", "Open QORVYNA AI", true, None::<&str>)?;
-            let voice_item = MenuItem::with_id(
-                app,
-                "voice",
-                "Floating assistant (Ctrl+Shift+Space)",
-                true,
-                None::<&str>,
-            )?;
-            let reload_item = MenuItem::with_id(app, "reload", "Reload Workspace", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit QORVYNA AI", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &voice_item, &reload_item, &quit_item])?;
+            // --- Tray (desktop only) ------------------------------------------
+            // On Android there is no tray: the notification-listener bubble
+            // and the system assistant gesture are the entry points.
+            #[cfg(desktop)]
+            {
+                let show_item = MenuItem::with_id(app, "show", "Open QORVYNA AI", true, None::<&str>)?;
+                let voice_item = MenuItem::with_id(
+                    app,
+                    "voice",
+                    "Floating assistant (Ctrl+Shift+Space)",
+                    true,
+                    None::<&str>,
+                )?;
+                let reload_item = MenuItem::with_id(app, "reload", "Reload Workspace", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "Quit QORVYNA AI", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &voice_item, &reload_item, &quit_item])?;
 
-            if let Some(icon) = app.default_window_icon().cloned() {
-                let _tray = TrayIconBuilder::new()
-                    .icon(icon)
-                    .tooltip("QORVYNA AI")
-                    .menu(&menu)
-                    .on_menu_event(|app, event| match event.id.as_ref() {
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    let _tray = TrayIconBuilder::new()
+                        .icon(icon)
+                        .tooltip("QORVYNA AI")
+                        .menu(&menu)
+                        .on_menu_event(|app, event| match event.id.as_ref() {
+                            "show" => {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
                             }
-                        }
-                        "voice" => {
-                            // Same entry point as the hotkey: the floating popup,
-                            // with the in-app bar as the fallback.
-                            popup_or_main(app);
-                        }
-                        "reload" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.eval("window.location.reload()");
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                            "voice" => {
+                                // Same entry point as the hotkey: the floating popup,
+                                // with the in-app bar as the fallback.
+                                popup_or_main(app);
                             }
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    })
-                    .build(app)?;
+                            "reload" => {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.eval("window.location.reload()");
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            _ => {}
+                        })
+                        .build(app)?;
+                }
             }
             Ok(())
         })

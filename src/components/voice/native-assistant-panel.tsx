@@ -15,7 +15,7 @@
 //     page needed to grant it — nothing here pretends a permission is granted.
 //
 // The wake phrase is enrolled by recording it (default twice). Enrolment is
-// what turns "Hey QORVYNA" on; deleting the samples switches it off again.
+// what turns "Hey AI" on; deleting the samples switches it off again.
 // =============================================================================
 
 import { useCallback, useEffect, useState } from "react";
@@ -166,7 +166,7 @@ export function NativeAssistantPanel() {
           <div className="rounded-xl border border-border p-3">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="font-medium text-ink">Wake phrase “Hey QORVYNA”</p>
+                <p className="font-medium text-ink">Wake phrase “Hey AI” (হেই এআই)</p>
                 <p className="text-xs text-ink-3">
                   On-device only: record the phrase {state.wakeRequired}× — {state.wakeSamples}/
                   {state.wakeRequired} saved on this phone. Audio never leaves the device.
@@ -187,7 +187,7 @@ export function NativeAssistantPanel() {
                     async () => {
                       // The recorder needs the runtime grant; ask before it opens.
                       await requestPermission("microphone").catch(() => null);
-                      setDetail("Recording 3 seconds — say “Hey QORVYNA” clearly.");
+                      setDetail("Recording 3 seconds — say “Hey AI” (হেই এআই) clearly.");
                       const result = await enrolWakeWordSample();
                       setDetail(result?.detail ?? "");
                     },

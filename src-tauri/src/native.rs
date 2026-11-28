@@ -50,7 +50,7 @@ pub struct AssistantState {
     /// Enrolled wake-phrase samples on this device (0 when none / not Android).
     #[serde(rename = "wakeSamples")]
     pub wake_samples: u32,
-    /// Samples required before "Hey QORVYNA" can work.
+    /// Samples required before "Hey AI" (হেই এআই) can work.
     #[serde(rename = "wakeRequired")]
     pub wake_required: u32,
     pub note: String,
@@ -258,7 +258,7 @@ pub fn qorvyna_assistant_state<R: Runtime>(app: AppHandle<R>) -> AssistantState 
         wake_required,
         note: service_note.unwrap_or_else(|| {
             if android {
-                "The floating assistant needs the Android overlay ("Display over other apps") and an on-device wake-word model; until both are present QORVYNA uses the assistant role and the bubble button only.".to_string()
+                "The floating assistant needs the Android overlay (\"Display over other apps\") and an on-device wake-word model; until both are present QORVYNA uses the assistant role and the bubble button only.".to_string()
             } else {
                 "Press Ctrl+Shift+Space (or use the tray menu) to open the floating assistant. Wake-word listening needs an on-device model, which is not bundled with the desktop build.".to_string()
             }
@@ -298,7 +298,7 @@ pub fn qorvyna_assistant_popup<R: Runtime>(
     crate::assistant::popup(&app, action.as_str())
 }
 
-/// Record one wake-phrase sample so "Hey QORVYNA" works on this device.
+/// Record one wake-phrase sample so "Hey AI" (হেই এআই) works on this device.
 #[tauri::command]
 pub fn qorvyna_wake_word_enrol() -> Result<serde_json::Value, String> {
     crate::assistant::enrol_wake_word()

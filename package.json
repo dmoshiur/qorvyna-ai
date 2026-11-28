@@ -26,6 +26,7 @@
     "tauri:build": "tauri build",
     "android:init": "tauri android init && node scripts/native/patch-android-manifest.mjs",
     "android:manifest": "node scripts/native/patch-android-manifest.mjs",
+    "android:apk": "node scripts/native/build-native-frontend.mjs && node scripts/native/ensure-android-project.mjs && tauri android build --apk --debug",
     "android:build": "node scripts/native/build-native-frontend.mjs && tauri android build",
     "windows:build": "node scripts/native/build-native-frontend.mjs && tauri build",
     "native:check": "node scripts/native/build-native-frontend.mjs --check"

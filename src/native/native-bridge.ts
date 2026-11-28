@@ -153,7 +153,7 @@ export const PERMISSION_CATALOG: Array<{
   {
     id: "background_microphone",
     label: "Background microphone",
-    why: "\"Hey QORVYNA\" detection while another app is open. Detection is on-device; audio is only sent after the wake word is heard.",
+    why: "\"Hey AI\" detection while another app is open. Detection is on-device; audio is only sent after the wake word is heard.",
     required: false,
     platforms: ["android"],
   },
@@ -212,7 +212,7 @@ export type AssistantState = {
   defaultAssistant: boolean;
   /** Enrolled wake-phrase samples on this device (0 when none). */
   wakeSamples: number;
-  /** Samples needed before "Hey QORVYNA" can match. */
+  /** Samples needed before "Hey AI" can match. */
   wakeRequired: number;
   /** Human explanation — shown verbatim, never a promise of more. */
   note: string;

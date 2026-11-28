@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "QORVYNA AI desktop & mobile — explicit, minimal command permissions for the bundled frontend window and the floating assistant popup.",
+  "description": "QORVYNA AI desktop & mobile — explicit, minimal command permissions for the bundled frontend window and the floating assistant popup. Desktop-only plugin permissions (global shortcut, shell) live in desktop-plugins.json so the Android ACL build does not fail on missing permissions.",
   "windows": [
     "main",
     "assistant"
@@ -13,11 +13,9 @@
     "core:window:allow-hide",
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
-    "global-shortcut:default",
     "notification:default",
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
-    "notification:allow-notify",
-    "shell:allow-open"
+    "notification:allow-notify"
   ]
 }

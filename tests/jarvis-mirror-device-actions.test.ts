@@ -35,21 +35,28 @@ const OTHER: SessionUser = {
 };
 
 describe("Phase 1 — Jarvis Wake-Word & Intent Classification", () => {
-  it("matches English and Bangla Hey QORVYNA wake variants and extracts immediate command", () => {
-    expect(matchWakeWord("Hey QORVYNA")).toEqual({
+  it("matches English and Bangla Hey AI wake variants and extracts immediate command", () => {
+    expect(matchWakeWord("Hey AI")).toEqual({
       matched: true,
-      wakeVariant: "hey qorvyna",
+      wakeVariant: "hey ai",
       commandText: "",
     });
-    expect(matchWakeWord("Hey korvina, remind me to call Doctor")).toEqual({
+    expect(matchWakeWord("hey a.i, remind me to call Doctor")).toEqual({
       matched: true,
-      wakeVariant: "hey qorvyna",
+      wakeVariant: "hey ai",
       commandText: "remind me to call Doctor",
     });
-    expect(matchWakeWord("হে করভিনা ডিভাইস স্ট্যাটাস")).toEqual({
+    expect(matchWakeWord("হেই এআই ডিভাইস স্ট্যাটাস")).toEqual({
       matched: true,
-      wakeVariant: "হে করভিনা",
+      wakeVariant: "হেই এআই",
       commandText: "ডিভাইস স্ট্যাটাস",
+    });
+    // A bare "AI" in an ordinary sentence must NOT trigger the wake word —
+    // it always needs the greeting prefix (Hey AI / OK AI / হেই এআই …).
+    expect(matchWakeWord("AI is the future")).toEqual({
+      matched: false,
+      wakeVariant: "",
+      commandText: "",
     });
     expect(matchWakeWord("Please explain photosynthesis")).toEqual({
       matched: false,

@@ -245,6 +245,33 @@ Prerequisites: Rust with Android targets, OpenJDK 17, Android SDK 34+, plus:
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 ```
 
+### The easy ways to get an APK
+
+**1. No local toolchain at all — let GitHub Actions build it.**
+The repository ships `.github/workflows/android-apk.yml`: it builds an
+installable APK on GitHub's servers and uploads it as the **QORVYNA-AI-APK**
+artifact. Open the repo on GitHub → **Actions** → **Android APK build** →
+**Run workflow** (works on any branch). It also runs automatically on every
+push to `main` and on PRs that touch app code. When the run finishes, download
+the artifact, unzip it, and install `app-universal-debug.apk` on the phone.
+
+**2. One command locally (needs the toolchain above).**
+
+```bash
+npm run android:apk
+```
+
+`android:apk` bundles the shared frontend, makes sure the generated Android
+project exists (`scripts/native/ensure-android-project.mjs` runs
+`tauri android init` + the manifest patch when needed) and produces a
+**debug-signed, installable** APK under
+`src-tauri/gen/android/app/build/outputs/apk/…`. Debug-signed means it installs
+on any device with zero keystore work — for a Play release, build and sign a
+release APK as described under “Signing (release)” below.
+
+> Note: a debug-signed APK cannot update in place over a differently-signed
+> build — uninstall the old one first.
+
 ### One-time project init
 
 ```bash
@@ -351,7 +378,7 @@ configured for a fixed allowlist only.
 | `overlay` | Draw over apps | Jarvis popup over other apps | android |
 | `background_microphone` | Background listening | on-device wake word while backgrounded | android |
 | `bluetooth` | Nearby devices | ESP32 nodes, headphones, wearables | android, ios |
-| `assistant_role` | Default assistant | "Hey QORVYNA" as the system assistant | android |
+| `assistant_role` | Default assistant | "Hey AI" (হেই এআই) as the system assistant | android |
 
 All eight are `required: false`. The Rust side reports `granted` only when the
 OS has really granted it, `unsupported` on platforms where the capability does
