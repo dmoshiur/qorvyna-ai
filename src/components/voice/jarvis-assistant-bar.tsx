@@ -4,7 +4,7 @@
 // Jarvis Voice Assistant Bar
 //
 // Features:
-//   - Visible status pill ("Hey QORVYNA" foreground wake-word standby,
+//   - Visible status pill ("Hey AI" foreground wake-word standby,
 //     command capture, speaking, or off).
 //   - Opt-in local SpeechRecognition wake-word matcher (NEVER sends continuous
 //     background audio to cloud; foreground tab only).
@@ -341,7 +341,7 @@ export function JarvisAssistantBar({
           } else {
             awaitingCommandRef.current = true;
             setWakeState("awaiting_command");
-            onJarvisNotice('Heard "Hey QORVYNA" — speak your command now.');
+            onJarvisNotice('Heard "Hey AI" — speak your command now.');
           }
           return;
         }
@@ -442,7 +442,7 @@ export function JarvisAssistantBar({
     : wakeState === "awaiting_command"
       ? "Listening for command…"
       : wakeState === "standby"
-        ? 'Wake: "Hey QORVYNA" (Foreground)'
+        ? 'Wake: "Hey AI" (Foreground)'
         : wakeState === "unsupported"
           ? "Wake unavailable"
           : "Jarvis ready";
@@ -455,7 +455,7 @@ export function JarvisAssistantBar({
             type="button"
             onClick={() => persistSettings({ wakeEnabled: !settings.wakeEnabled })}
             className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 font-medium text-ink transition hover:border-accent"
-            title="Toggle foreground Hey QORVYNA wake word"
+            title="Toggle foreground Hey AI wake word"
           >
             {settings.wakeEnabled ? <Ear size={13} className="text-accent" /> : <EarOff size={13} className="text-ink-3" />}
             <span>{statusLabel}</span>
@@ -528,7 +528,7 @@ export function JarvisAssistantBar({
       <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title="Jarvis Voice Assistant Settings">
         <div className="space-y-4 text-sm">
           <div className="rounded-xl border border-border bg-surface-2/60 p-3 text-xs text-ink-2">
-            Web wake-word listening (&ldquo;Hey QORVYNA&rdquo;) runs strictly in the foreground while this tab is active — continuous background audio is never streamed to the cloud.
+            Web wake-word listening (&ldquo;Hey AI&rdquo; / &ldquo;হেই এআই&rdquo;) runs strictly in the foreground while this tab is active — continuous background audio is never streamed to the cloud.
           </div>
 
           {/* The installed app has a real system assistant (popup on desktop,
@@ -538,7 +538,7 @@ export function JarvisAssistantBar({
 
           <label className="flex items-center justify-between gap-3 rounded-xl border border-border p-3">
             <div>
-              <p className="font-medium text-ink">Foreground wake word (&ldquo;Hey QORVYNA&rdquo;)</p>
+              <p className="font-medium text-ink">Foreground wake word (&ldquo;Hey AI&rdquo; / &ldquo;হেই এআই&rdquo;)</p>
               <p className="text-xs text-ink-3">Supports English and Bangla wake variants.</p>
             </div>
             <input

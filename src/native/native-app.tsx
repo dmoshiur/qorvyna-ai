@@ -590,7 +590,7 @@ function FirstRunSetup({ onClose }: { onClose: () => void }) {
         {assistant ? (
           <div className="mt-4 rounded-xl border border-border bg-surface p-3">
             <div className="flex items-center gap-2 text-[13.5px] font-medium text-ink">
-              <Mic className="h-4 w-4" aria-hidden="true" /> “Hey QORVYNA” and the assistant bubble
+              <Mic className="h-4 w-4" aria-hidden="true" /> “Hey AI” (হেই এআই) and the assistant bubble
             </div>
             <p className="mt-1 text-[12px] leading-relaxed text-ink-2">{assistant.note}</p>
             <ul className="mt-2 space-y-1 text-[12px] text-ink-2">

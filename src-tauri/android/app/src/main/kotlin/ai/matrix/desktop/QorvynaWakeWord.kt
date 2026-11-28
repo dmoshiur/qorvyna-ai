@@ -11,7 +11,7 @@ import kotlin.math.sqrt
 import kotlin.math.tanh
 
 /**
- * QORVYNA on-device wake-word engine ("Hey QORVYNA").
+ * QORVYNA on-device wake-word engine ("Hey AI" / "হেই এআই").
  *
  * This is a real keyword spotter that runs entirely on the phone. No network
  * call, no cloud account, no vendor SDK that has to be downloaded at build

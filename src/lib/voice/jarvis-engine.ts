@@ -70,15 +70,21 @@ export const DEFAULT_JARVIS_SETTINGS: JarvisSettings = {
 };
 
 const WAKE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
-  { label: "hey qorvyna", regex: /(?:^|\b)(?:hey|hi|ok|okay|hello)\s+(?:qorvyna|korvina|corvina|qorvina|corvyna|gorvina|qorveena|qorbina|korbina)(?:\b|[,\s])/i },
-  { label: "qorvyna", regex: /^(?:qorvyna|korvina|corvina)\b[,\s:]*/i },
-  { label: "হে করভিনা", regex: /(?:^|\s)(?:হে|হেই|ওকে|হ্যালো)\s*(?:করভিনা|কোরভিনা|করবিনা|কোরবিনা|qorvyna)(?:\s|[,\u0964]|$)/i },
+  {
+    label: "hey ai",
+    regex: /(?:^|\b)(?:hey|hi|ok|okay|hello)\s+(?:ai|a\.?\s?i\.?|aye)(?:\b|[,\s])/i,
+  },
+  {
+    label: "হেই এআই",
+    regex: /(?:^|\s)(?:হেই|হে|ওকে|হ্যালো)\s*(?:এআই|এ\s*আই|ai)(?:\s|[,\u0964]|$)/i,
+  },
 ];
 
 /**
- * Matches local wake phrase `"Hey QORVYNA"` (plus common ASR phonetic variants
- * in English and Bangla) and strips the wake prefix to return any immediate
- * spoken command.
+ * Matches local wake phrase `"Hey AI"` (হেই এআই) (plus common ASR phonetic
+ * variants in English and Bangla) and strips the wake prefix to return any
+ * immediate spoken command. A bare "AI" in a sentence is deliberately NOT a
+ * wake match — it needs the greeting prefix ("Hey AI", "OK AI", "হেই এআই"…).
  */
 export function matchWakeWord(rawTranscript: string): JarvisWakeMatch {
   const cleaned = rawTranscript.replace(/\s+/g, " ").trim();

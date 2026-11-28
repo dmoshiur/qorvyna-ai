@@ -66,7 +66,7 @@ class AssistantPlugin(private val activity: Activity) : Plugin(activity) {
                 "Grant “Display over other apps” so the floating bubble can sit over other apps."
             !ready ->
                 "Wake phrase not enrolled yet: record it ${QorvynaWakeWord.MIN_TEMPLATES} times " +
-                    "in QORVYNA settings to use “Hey QORVYNA”."
+                    "in QORVYNA settings to use “Hey AI” (হেই এআই)."
             !defaultAssistant ->
                 "Bubble and wake phrase are ready. Set QORVYNA as the digital assistant " +
                     "for the system gesture."
@@ -169,7 +169,7 @@ class AssistantPlugin(private val activity: Activity) : Plugin(activity) {
                     stateObject().put(
                         "detail",
                         "Record the wake phrase ${QorvynaWakeWord.MIN_TEMPLATES} times before " +
-                            "“Hey QORVYNA” can work — nothing is listening yet.",
+                            "“Hey AI” (হেই এআই) can work — nothing is listening yet.",
                     ),
                 )
                 return
