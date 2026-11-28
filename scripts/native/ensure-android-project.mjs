@@ -53,15 +53,17 @@ run("node", ["scripts/native/patch-android-manifest.mjs"]);
 console.log("[android] generating the branded launcher icons (tauri icon).");
 run("npx", ["tauri", "icon", "src-tauri/icons/icon.png"]);
 
-// Release signing: when signing/keystore.properties exists (CI prepares it;
+// App signing: when signing/keystore.properties exists (CI prepares it;
 // a local build may provide its own), copy it into the generated project root
-// where the Tauri Gradle template reads it — release APKs then install as
-// signed updates instead of failing with "App not installed".
+// where the patched Gradle build reads it. Without it the Gradle build falls
+// back to the committed signing/qorvyna-upload.jks — so debug AND release APKs
+// are always signed with the same key and install over / update each other
+// instead of failing with "package conflicts with an existing package".
 const keystoreProps = join(root, "signing", "keystore.properties");
 if (existsSync(keystoreProps)) {
   const target = join(genAndroid, "keystore.properties");
   writeFileSync(target, readFileSync(keystoreProps, "utf8"));
-  console.log("[android] release signing: keystore.properties placed in the generated project.");
+  console.log("[android] app signing: keystore.properties placed in the generated project.");
 } else {
-  console.log("[android] release signing: no signing/keystore.properties — release builds will be unsigned (debug builds install fine).");
+  console.log("[android] app signing: no signing/keystore.properties — debug + release builds use the committed signing/qorvyna-upload.jks.");
 }

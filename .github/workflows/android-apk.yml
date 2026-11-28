@@ -7,11 +7,13 @@
 # one on GitHub's servers on every push to `main` (and on app-related PRs, and
 # on demand from the Actions tab) and uploads it as a downloadable artifact.
 #
-# The APK is DEBUG-SIGNED on purpose: it installs on any device with no
-# keystore management. For a store release, build + sign a release APK locally
-# (app_build_guide.md § "Signing (release)" / WINDOWS_BUILD_GUIDE.md §8).
+# Every APK is signed with the ONE QORVYNA key (signing/README.md) — never a
+# runner-generated debug key — so each new APK installs as an in-place update
+# of the previous one instead of failing with "App not installed as package
+# conflicts with an existing package". The build fails before publishing if
+# the APK carries any other certificate.
 #
-# It runs the exact same command a developer runs locally: `npm run android:apk`.
+# It runs the same command a developer runs locally: `npm run android:apk:release`.
 # =============================================================================
 
 name: Android APK build
@@ -184,7 +186,21 @@ jobs:
           cp "$UNIVERSAL" release-assets/QORVYNA-AI-android.apk
           # Verify the APK is really signed before publishing it.
           TOOL=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
-          "$TOOL/apksigner" verify --print-certs "$UNIVERSAL" | head -4 || { echo "APK signature verification FAILED"; exit 1; }
+          CERTS=$("$TOOL/apksigner" verify --print-certs "$UNIVERSAL") || { echo "APK signature verification FAILED"; exit 1; }
+          echo "$CERTS" | head -4
+          # ...and signed with the configured QORVYNA key. An APK signed with any
+          # other certificate (e.g. a runner debug key) cannot update installed
+          # copies — Android rejects it with "package conflicts with an existing
+          # package" — so refuse to publish it.
+          prop() { sed -n "s/^$1=//p" signing/keystore.properties; }
+          EXPECTED=$(keytool -list -v -keystore "$(prop storeFile)" -alias "$(prop keyAlias)" -storepass "$(prop storePassword)" \
+            | sed -n "s/^[[:space:]]*SHA256: *//p" | head -n 1 | tr -d ": " | tr "[:upper:]" "[:lower:]")
+          ACTUAL=$(echo "$CERTS" | sed -n "s/^Signer #1 certificate SHA-256 digest: *//p" | head -n 1 | tr -d ": " | tr "[:upper:]" "[:lower:]")
+          echo "Expected signer SHA-256: $EXPECTED"
+          echo "APK signer SHA-256:      $ACTUAL"
+          if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update)."; exit 1
+          fi
           sha256sum release-assets/QORVYNA-AI-android.apk > release-assets/QORVYNA-AI-android.apk.sha256
           ls -lh release-assets
 
@@ -203,6 +219,10 @@ jobs:
             - Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under settings → Assistant.
             - “Continue with Google” works in the app; the Firebase config is baked in.
             - Per-ABI debug variants remain available as the **QORVYNA-AI-APK** build artifact.
+            - Every build is signed with the same QORVYNA key, so new versions install as updates.
+              If Android says *"App not installed as package conflicts with an existing package"*,
+              the phone still has an older copy signed with a different (debug) key: uninstall
+              QORVYNA AI once, then install this APK — later updates install in place.
           files: |
             release-assets/QORVYNA-AI-android.apk
             release-assets/QORVYNA-AI-android.apk.sha256
@@ -227,6 +247,7 @@ jobs:
             echo "(also on the [Releases page](https://github.com/dmoshiur/qorvyna-ai/releases/latest) as \`apk-latest\`)."
             echo ""
             echo "- Signed release build (universal: arm64 / armv7 / x86_64) — installs and updates in place."
+            echo "- \"Package conflicts with an existing package\"? An older, differently-signed copy is installed: uninstall it once, then install."
             echo "- Wake word: say **“Hey AI” (হেই এআই)** — enrol it once under settings → Assistant."
             echo "- Firebase (Continue with Google) is baked into the bundle from google-services.json."
           } >> "$GITHUB_STEP_SUMMARY"
