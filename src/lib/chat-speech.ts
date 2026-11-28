@@ -27,7 +27,7 @@ export function speechTextFromMarkdown(md: string): string {
 export function preferredSpeechLang(text: string, uiLocale = "en"): string {
   if (/[\u0980-\u09FF]/.test(text)) return "bn-BD";
   if (uiLocale === "bn") return "bn-BD";
-  return "en-US";
+  return uiLocale === "en" ? "en-US" : uiLocale;
 }
 
 export function readAutoSpeakPreference(defaultValue = true): boolean {
@@ -56,6 +56,7 @@ export function isSpeechSupported(): boolean {
 }
 
 let speakToken = 0;
+let cancelActive: (() => void) | null = null;
 let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
 
 function clearKeepAlive() {
@@ -66,6 +67,9 @@ function clearKeepAlive() {
 }
 
 export function stopSpeech(): void {
+  const cancelled = cancelActive;
+  cancelActive = null;
+  cancelled?.();
   speakToken += 1;
   clearKeepAlive();
   if (typeof window !== "undefined" && window.speechSynthesis) {
@@ -96,12 +100,12 @@ function pickVoice(lang: string, preferredVoiceName?: string): SpeechSynthesisVo
   if (!voices.length) return null;
   if (preferredVoiceName) {
     const chosen = voices.find((v) => v.name === preferredVoiceName);
-    if (chosen) return chosen;
+    if (chosen && chosen.lang.toLowerCase().startsWith(lang.slice(0, 2).toLowerCase())) return chosen;
   }
   const exact = voices.find((v) => v.lang === lang);
   if (exact) return exact;
   const prefix = lang.slice(0, 2).toLowerCase();
-  return voices.find((v) => v.lang.toLowerCase().startsWith(prefix)) ?? voices.find((v) => v.default) ?? voices[0] ?? null;
+  return voices.find((v) => v.lang.toLowerCase().startsWith(prefix)) ?? null;
 }
 
 export function listSpeechVoices(): Array<{ name: string; lang: string; localService: boolean }> {
@@ -158,6 +162,10 @@ export function speakPlainText(
   const chunks = chunkText(cleaned);
   let index = 0;
   let started = false;
+  let settled = false;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let startTimer: ReturnType<typeof setTimeout> | undefined;
+  let voicesListener: (() => void) | undefined;
 
   keepAliveTimer = setInterval(() => {
     if (token !== speakToken || !window.speechSynthesis.speaking) {
@@ -172,19 +180,23 @@ export function speakPlainText(
     }
   }, 8000);
 
-  const finishOk = () => {
-    if (token !== speakToken) return;
+  const finish = (error: boolean) => {
+    if (settled || token !== speakToken) return;
+    settled = true;
+    clearTimeout(watchdog);
+    clearTimeout(startTimer);
+    if (voicesListener) window.speechSynthesis.removeEventListener("voiceschanged", voicesListener);
     clearKeepAlive();
-    opts.onend?.();
+    cancelActive = null;
+    if (error) opts.onerror?.(); else opts.onend?.();
   };
-  const finishErr = () => {
-    if (token !== speakToken) return;
-    clearKeepAlive();
-    opts.onerror?.();
-  };
+  const finishOk = () => finish(false);
+  const finishErr = () => finish(true);
+  cancelActive = finishOk;
 
   const speakNext = () => {
-    if (token !== speakToken) return;
+    if (settled || token !== speakToken) return;
+    clearTimeout(watchdog);
     if (index >= chunks.length) {
       finishOk();
       return;
@@ -192,12 +204,23 @@ export function speakPlainText(
     const utterance = new SpeechSynthesisUtterance(chunks[index++]);
     utterance.lang = lang;
     const voice = pickVoice(lang, opts.voiceName);
+    if (!voice && window.speechSynthesis.getVoices().length) {
+      // Never pretend an English fallback can speak the requested language.
+      finishErr();
+      return;
+    }
     if (voice) utterance.voice = voice;
     utterance.rate = typeof opts.rate === "number" && Number.isFinite(opts.rate) ? opts.rate : 1.02;
     utterance.pitch = 1;
     utterance.onend = speakNext;
     utterance.onerror = finishErr;
     try {
+      // Some engines omit end/error (device loss, blocked autoplay). Bound the
+      // state even then; cancel prevents a stale chunk speaking afterwards.
+      watchdog = setTimeout(() => {
+        finishErr();
+        try { window.speechSynthesis.cancel(); } catch { /* unavailable */ }
+      }, Math.max(15000, utterance.text.length * 180));
       window.speechSynthesis.speak(utterance);
     } catch {
       finishErr();
@@ -211,8 +234,9 @@ export function speakPlainText(
   };
 
   if (window.speechSynthesis.getVoices().length === 0) {
+    voicesListener = start;
     window.speechSynthesis.addEventListener("voiceschanged", start, { once: true });
-    setTimeout(start, 300);
+    startTimer = setTimeout(start, 300);
   } else {
     start();
   }
@@ -221,9 +245,9 @@ export function speakPlainText(
 
 export function speakMarkdown(
   md: string,
-  opts: { locale?: string; voiceName?: string; rate?: number; onend?: () => void; onerror?: () => void } = {},
+  opts: { lang?: string; locale?: string; voiceName?: string; rate?: number; onend?: () => void; onerror?: () => void } = {},
 ): boolean {
   const text = speechTextFromMarkdown(md);
-  const lang = preferredSpeechLang(text, opts.locale ?? "en");
+  const lang = opts.lang && opts.lang !== "auto" ? opts.lang : preferredSpeechLang(text, opts.locale ?? "en");
   return speakPlainText(text, { lang, voiceName: opts.voiceName, rate: opts.rate, onend: opts.onend, onerror: opts.onerror });
 }

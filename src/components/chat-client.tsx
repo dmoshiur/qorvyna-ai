@@ -111,6 +111,7 @@ import { DeploySuccessPopup } from "@/components/build/deploy-card";
 import { toRunSnapshot, type BuildRun } from "@/lib/deploy/stages";
 import { planOrchestrator } from "@/lib/ai/router";
 import type { AgentStageId, PipelineAnalytics } from "@/lib/ai/pipeline";
+import { LiveConversation } from "@/components/voice/live-conversation";
 import { JarvisAssistantBar } from "@/components/voice/jarvis-assistant-bar";
 import { DEFAULT_JARVIS_SETTINGS, type JarvisSettings } from "@/lib/voice/jarvis-engine";
 
@@ -455,7 +456,9 @@ export function ChatClient({
   });
 
   // --- speech: QORVYNA reading an answer aloud --------------------------------
+  const [liveOpen, setLiveOpen] = useState(false);
   const [autoSpeak, setAutoSpeak] = useState(true);
+  const [speechLoading, setSpeechLoading] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
 
   // --- voice messages: dictation (Mode A default) + hands-free (Mode B) ---
@@ -510,6 +513,7 @@ export function ChatClient({
       if (savedMode) { const nextMode = normalizeVoiceInputMode(savedMode); voiceModeRef.current = nextMode; setVoiceModeState(nextMode); }
     } catch { /* private mode: defaults are used */ }
   }, []);
+  const speechRequestRef = useRef<AbortController | null>(null);
   const generatedAudioRef = useRef<HTMLAudioElement | null>(null);
   const generatedAudioUrlRef = useRef<string | null>(null);
 
@@ -1041,7 +1045,14 @@ export function ChatClient({
   }
 
   function stopGeneratedSpeech() {
-    generatedAudioRef.current?.pause();
+    setSpeechLoading(false);
+    speechRequestRef.current?.abort();
+    speechRequestRef.current = null;
+    if (generatedAudioRef.current) {
+      generatedAudioRef.current.onended = null;
+      generatedAudioRef.current.onerror = null;
+      generatedAudioRef.current.pause();
+    }
     generatedAudioRef.current = null;
     if (generatedAudioUrlRef.current) URL.revokeObjectURL(generatedAudioUrlRef.current);
     generatedAudioUrlRef.current = null;
@@ -1059,18 +1070,25 @@ export function ChatClient({
     stopGeneratedSpeech();
     setSpeakingId(id);
     const plain = speechTextFromMarkdown(text);
+    const controller = new AbortController();
+    speechRequestRef.current = controller;
+    setSpeechLoading(true);
     try {
       const response = await fetch("/api/voice/speech", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: plain }),
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60000)]),
       });
       if (!response.ok) throw new Error("Server speech synthesis is not configured or unavailable");
-      const url = URL.createObjectURL(await response.blob());
+      const blob = await response.blob();
+      if (controller.signal.aborted || speechRequestRef.current !== controller) return;
+      const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       generatedAudioUrlRef.current = url;
       generatedAudioRef.current = audio;
+      setSpeechLoading(false);
       audio.onended = () => {
         stopGeneratedSpeech();
         setSpeakingId((current) => (current === id ? null : current));
@@ -1082,12 +1100,15 @@ export function ChatClient({
       };
       await audio.play();
     } catch {
+      if (controller.signal.aborted || speechRequestRef.current !== controller) return;
+      stopGeneratedSpeech();
       // Keep the existing browser voice as a truthful accessibility fallback;
       // the generated-audio endpoint never fabricates a successful response.
       setNotice("AI speech synthesis is unavailable right now; using your device's built-in voice instead.");
       primeSpeech();
       const ok = speakMarkdown(text, {
         locale: localeRef.current,
+        lang: voiceLangRef.current,
         voiceName: jarvisSettingsRef.current.voiceName || undefined,
         rate: jarvisSettingsRef.current.speechRate,
         onend: () => setSpeakingId((current) => (current === id ? null : current)),
@@ -1101,14 +1122,18 @@ export function ChatClient({
     if (mode === "agent" || !autoSpeakRef.current) return;
     const cleaned = text.trim();
     if (!cleaned) return;
+    stopSpeech();
+    stopGeneratedSpeech();
+    setSpeakingId("auto");
     const ok = speakMarkdown(cleaned, {
       locale: localeRef.current,
+      lang: voiceLangRef.current,
       voiceName: jarvisSettingsRef.current.voiceName || undefined,
       rate: jarvisSettingsRef.current.speechRate,
       onend: () => setSpeakingId((current) => (current === "auto" ? null : current)),
-      onerror: () => setSpeakingId((current) => (current === "auto" ? null : current)),
+      onerror: () => { setSpeakingId((current) => (current === "auto" ? null : current)); setNotice("Your device could not speak this language. Use Live voice for provider-generated multilingual audio."); },
     });
-    setSpeakingId(ok ? "auto" : null);
+    if (!ok) setSpeakingId(null);
   }
 
   // -------------------------------------------------------------------------
@@ -1205,7 +1230,7 @@ export function ChatClient({
   }
 
   async function startVoice() {
-    if (recorder.state !== "idle" || transcribing || busy) return;
+    if (recorder.state !== "idle" || transcribing || busy || liveOpen) return;
     // QORVYNA must not record its own voice.
     stopSpeech();
     stopGeneratedSpeech();
@@ -3141,9 +3166,21 @@ export function ChatClient({
         conversation={conversationActions}
       />
 
+      <div className="flex justify-end border-b border-border px-3 py-1">
+        <button type="button" className="rounded-lg px-3 py-2 text-sm text-accent disabled:opacity-50"
+          disabled={busy || transcribing || recorder.state !== "idle"}
+          onClick={() => { stopSpeech(); stopGeneratedSpeech(); setSpeakingId(null); setLiveOpen(true); }}>
+          Live voice & video
+        </button>
+      </div>
+      <LiveConversation open={liveOpen} onClose={() => setLiveOpen(false)} language={voiceLang} />
       {!isTemporary ? (
         <JarvisAssistantBar
-          speaking={speakingId !== null}
+          speaking={speakingId !== null && !speechLoading}
+          captureBusy={busy || speechLoading || transcribing || recorder.state !== "idle" || liveOpen}
+          recording={recorder.state === "recording" || recorder.state === "paused"}
+          onFinishRecording={() => void finishVoice("hands_free_send")}
+          onCancelRecording={cancelVoice}
           autoSpeak={autoSpeak}
           voiceLang={voiceLang}
           onVoiceLangChange={setVoiceLang}
