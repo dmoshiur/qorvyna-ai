@@ -138,6 +138,15 @@ jobs:
           npm run android:apk:release 2>&1 | tee "$RUNNER_TEMP/build.log"
           exit "${PIPESTATUS[0]}"
 
+      # Boot the bundled frontend (exactly what the APK ships) in headless
+      # Chrome with the app's CSP: fails on boot errors, a blank screen or a
+      # missing stylesheet instead of publishing an APK that opens white.
+      - name: Boot-test the bundled app frontend
+        run: |
+          CHROME_PATH="$(command -v google-chrome || command -v chromium || command -v chromium-browser)" \
+            npm run native:smoke 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          exit "${PIPESTATUS[0]}"
+
       # GitHub now requires sign-in to view raw logs; the step summary is
       # public, so on failure publish the tail there where it is readable.
       - name: Publish the build log tail on failure

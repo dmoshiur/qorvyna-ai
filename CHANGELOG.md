@@ -2,6 +2,13 @@
 
 Notable changes to QORVYNA. Newest first.
 
+## Android app: fix the blank white screen on launch
+
+- Root cause 1: the app bundle compiled `next/navigation`, `next/link` and `next/image` as Next.js's real runtime. That code reads `process.env.__NEXT_*`, which doesn't exist in a WebView, so the bundle threw `process is not defined` on boot and rendered nothing. The bundler now aliases those imports to the native shell's own replacements (`src/native/router.tsx`, `src/native/next-image.tsx`).
+- Root cause 2: esbuild wrote the component CSS (KaTeX) to `app.css`, overwriting the Tailwind design system, so the app was unstyled. Tailwind now builds to a temporary file and both are merged into `app.css`.
+- The window loads `index.html`, so the router started on `/index.html` and would have shown "This screen is not in the app" after sign-in. That path now opens `/chat`.
+- New `npm run native:smoke` boots the bundle in headless Chrome with the app's CSP. CI runs it and won't publish an APK that throws on boot, renders blank or loses its stylesheet.
+
 ## Android APK: fix "package conflicts with an existing package"
 
 - Root cause: the Tauri-generated Gradle build had no signing for debug builds, so each debug APK (the earlier CI builds and `npm run android:apk`) was signed with whatever random `debug.keystore` that machine or CI runner had generated. The signed release APK uses the QORVYNA key, and Android refuses to replace an installed app with one signed by a different certificate.

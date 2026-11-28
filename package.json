@@ -30,7 +30,8 @@
     "android:apk:release": "node scripts/native/build-native-frontend.mjs && node scripts/native/ensure-android-project.mjs && tauri android build --apk",
     "android:build": "node scripts/native/build-native-frontend.mjs && tauri android build",
     "windows:build": "node scripts/native/build-native-frontend.mjs && tauri build",
-    "native:check": "node scripts/native/build-native-frontend.mjs --check"
+    "native:check": "node scripts/native/build-native-frontend.mjs --check",
+    "native:smoke": "node scripts/native/smoke-native-bundle.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.4",
