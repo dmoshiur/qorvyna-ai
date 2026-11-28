@@ -39,6 +39,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: android-apk-${{ github.ref }}
@@ -119,6 +120,22 @@ jobs:
             tail -n 250 "$RUNNER_TEMP/build.log"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Raw logs need sign-in and summaries are JS-rendered, so also post the
+      # tail as a PR comment where tooling (and the reviewer) can read it.
+      - name: Comment the build log tail on the PR
+        if: failure() && github.event.pull_request.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Android APK build failed — log tail"
+            echo ""
+            echo '```'
+            tail -n 300 "$RUNNER_TEMP/build.log"
+            echo '```'
+          } > /tmp/logtail.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/logtail.md
 
       - name: List the produced APKs
         run: |
