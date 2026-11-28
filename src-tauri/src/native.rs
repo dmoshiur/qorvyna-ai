@@ -258,7 +258,7 @@ pub fn qorvyna_assistant_state<R: Runtime>(app: AppHandle<R>) -> AssistantState 
         wake_required,
         note: service_note.unwrap_or_else(|| {
             if android {
-                "The floating assistant needs the Android overlay ("Display over other apps") and an on-device wake-word model; until both are present QORVYNA uses the assistant role and the bubble button only.".to_string()
+                "The floating assistant needs the Android overlay (\"Display over other apps\") and an on-device wake-word model; until both are present QORVYNA uses the assistant role and the bubble button only.".to_string()
             } else {
                 "Press Ctrl+Shift+Space (or use the tray menu) to open the floating assistant. Wake-word listening needs an on-device model, which is not bundled with the desktop build.".to_string()
             }
