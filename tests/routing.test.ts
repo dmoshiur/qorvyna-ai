@@ -74,6 +74,8 @@ describe("middleware static-asset exclusions", () => {
   it("excludes .html files (Google site verification) and sw.js from auth redirects", () => {
     expect(matcher.test("/google2c32b414ac39f412.html")).toBe(false);
     expect(matcher.test("/sw.js")).toBe(false);
+    expect(matcher.test("/audio/live-capture.js")).toBe(false);
+    expect(matcher.test("/audio/private-page")).toBe(true);
     expect(matcher.test("/site.webmanifest")).toBe(false);
   });
 

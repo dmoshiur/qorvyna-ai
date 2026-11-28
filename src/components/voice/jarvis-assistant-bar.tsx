@@ -6,8 +6,8 @@
 // Features:
 //   - Visible status pill ("Hey AI" foreground wake-word standby,
 //     command capture, speaking, or off).
-//   - Opt-in local SpeechRecognition wake-word matcher (NEVER sends continuous
-//     background audio to cloud; foreground tab only).
+//   - Opt-in browser SpeechRecognition wake matcher (foreground tab only).
+//     The browser may use a remote speech service.
 //   - Global keyboard shortcut Ctrl+Shift+Space (or Cmd+Shift+Space on macOS)
 //     and native Tauri event `qorvyna://voice-activate` to trigger voice.
 //   - Immediate Interrupt button when AI is speaking.
@@ -66,6 +66,10 @@ async function invokeTauriCommand(cmd: string, args: Record<string, unknown>): P
 
 export function JarvisAssistantBar({
   speaking,
+  captureBusy = false,
+  recording = false,
+  onFinishRecording,
+  onCancelRecording,
   autoSpeak,
   voiceLang,
   onVoiceLangChange,
@@ -78,6 +82,10 @@ export function JarvisAssistantBar({
   commandDispatchRef,
 }: {
   speaking: boolean;
+  captureBusy?: boolean;
+  recording?: boolean;
+  onFinishRecording?: () => void;
+  onCancelRecording?: () => void;
   autoSpeak: boolean;
   voiceLang: string;
   onVoiceLangChange: (code: string) => void;
@@ -98,10 +106,20 @@ export function JarvisAssistantBar({
   const [executingAction, setExecutingAction] = useState(false);
 
   const recRef = useRef<SpeechRecLike | null>(null);
-  const awaitingCommandRef = useRef(false);
+
   const wakeEnabledRef = useRef(false);
-  const speakingRef = useRef(speaking);
-  speakingRef.current = speaking;
+  // Parent callbacks change on each streamed token. Never use them as capture
+  // effect dependencies: that used to reconnect the microphone on every render.
+  const callbacksRef = useRef({ onStartPushToTalk, onInterruptSpeech, onJarvisNotice, handleRecognizedUtterance: async (_text: string) => {}, persistSettings: (_patch: Partial<JarvisSettings>) => {} });
+  const [foreground, setForeground] = useState(true);
+  const [wakeHandoff, setWakeHandoff] = useState(false);
+  useEffect(() => {
+    const update = () => setForeground(document.visibilityState === "visible");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  useEffect(() => { if (recording || captureBusy) setWakeHandoff(false); }, [recording, captureBusy]);
 
   useEffect(() => {
     try {
@@ -281,111 +299,93 @@ export function JarvisAssistantBar({
     };
   }, [commandDispatchRef, handleRecognizedUtterance]);
 
-  // Foreground SpeechRecognition wake-word loop (only when user explicitly enables wakeEnabled).
+  callbacksRef.current = { onStartPushToTalk, onInterruptSpeech, onJarvisNotice, handleRecognizedUtterance, persistSettings };
+
+  // Only configuration / capture ownership changes may rebuild this listener.
   useEffect(() => {
-    if (!settings.wakeEnabled) {
-      try {
-        recRef.current?.stop();
-      } catch {
-        /* ignore */
-      }
-      recRef.current = null;
-      awaitingCommandRef.current = false;
+    if (!settings.wakeEnabled || speaking || captureBusy || recording || !foreground) {
       setWakeState("off");
-      setWakeError("");
       return;
     }
-
-    const ctor =
-      typeof window !== "undefined"
-        ? ((window as unknown as { SpeechRecognition?: new () => SpeechRecLike; webkitSpeechRecognition?: new () => SpeechRecLike }).SpeechRecognition ??
-           (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecLike }).webkitSpeechRecognition)
-        : undefined;
-
-    if (!ctor) {
+    const win = window as unknown as { SpeechRecognition?: new () => SpeechRecLike; webkitSpeechRecognition?: new () => SpeechRecLike };
+    const Ctor = win.SpeechRecognition ?? win.webkitSpeechRecognition;
+    if (!Ctor) {
       setWakeState("unsupported");
-      setWakeError("This browser does not support local wake-word recognition. Use Push-to-talk or the Android/Windows app.");
+      setWakeError("Wake recognition is unavailable in this browser. Use Speak instead.");
       return;
     }
-
     let cancelled = false;
-    const rec = new ctor();
+    let handedOff = false;
+    let retries = 0;
+    let restart: ReturnType<typeof setTimeout> | undefined;
+    const rec = new Ctor();
+    recRef.current = rec;
     rec.continuous = true;
     rec.interimResults = false;
-    rec.lang = voiceLang === "auto" ? "en-US" : voiceLang;
-    recRef.current = rec;
+    rec.lang = voiceLang === "auto" ? navigator.language || "en-US" : voiceLang;
     setWakeState("standby");
     setWakeError("");
-
+    const start = () => {
+      if (cancelled || handedOff) return;
+      try { rec.start(); } catch {
+        setWakeError("Could not start wake listener. Toggle wake listening to retry.");
+      }
+    };
     rec.onresult = (ev) => {
-      if (cancelled || speakingRef.current) return;
+      if (cancelled || handedOff) return;
+      retries = 0;
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const res = ev.results[i];
-        if (!res.isFinal) continue;
-        const transcript = res[0]?.transcript ?? "";
-        if (!transcript.trim()) continue;
-
-        if (awaitingCommandRef.current) {
-          awaitingCommandRef.current = false;
-          setWakeState("standby");
-          void handleRecognizedUtterance(transcript);
-          return;
-        }
-
-        const wake = matchWakeWord(transcript);
-        if (wake.matched) {
-          onInterruptSpeech();
+        if (!ev.results[i].isFinal) continue;
+        const wake = matchWakeWord(ev.results[i][0]?.transcript ?? "");
+        if (!wake.matched) continue;
+        handedOff = true;
+        setWakeHandoff(true);
+        // Wait for recognition to release the mic before the recorder takes it.
+        rec.onend = () => {
+          rec.onend = null;
+          if (cancelled) return;
+          callbacksRef.current.onInterruptSpeech();
           if (wake.commandText) {
-            setWakeState("standby");
-            void handleRecognizedUtterance(wake.commandText);
+            void callbacksRef.current.handleRecognizedUtterance(wake.commandText)
+              .catch(() => callbacksRef.current.onJarvisNotice("Could not send the spoken command. Please try again."))
+              .finally(() => setWakeHandoff(false));
           } else {
-            awaitingCommandRef.current = true;
-            setWakeState("awaiting_command");
-            onJarvisNotice('Heard "Hey AI" — speak your command now.');
+            callbacksRef.current.onStartPushToTalk();
+            setWakeHandoff(false);
           }
-          return;
+        };
+        try { rec.stop(); } catch {
+          setWakeHandoff(false);
+          setWakeError("Could not release wake recognition. Toggle it off and use Speak.");
         }
+        return;
       }
     };
-
     rec.onerror = (ev) => {
-      if (cancelled) return;
-      if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
-        setWakeError("Microphone permission denied. Enable mic access in browser settings.");
-        persistSettings({ wakeEnabled: false });
-      }
+      if (cancelled || ev.error === "aborted" || ev.error === "no-speech") return;
+      // Permission/network/service errors must not create an endless mic loop.
+      handedOff = true;
+      setWakeError(`Wake listening stopped (${ev.error}). Toggle wake listening to retry.`);
+      callbacksRef.current.persistSettings({ wakeEnabled: false });
     };
-
     rec.onend = () => {
-      if (cancelled || !wakeEnabledRef.current) return;
-      if (document.visibilityState === "visible") {
-        window.setTimeout(() => {
-          if (!cancelled && wakeEnabledRef.current) {
-            try {
-              rec.start();
-            } catch {
-              /* ignore duplicate start */
-            }
-          }
-        }, 400);
+      if (cancelled || handedOff) return;
+      if (++retries > 5) {
+        setWakeError("Wake listening stopped after repeated disconnects. Toggle it to retry.");
+        callbacksRef.current.persistSettings({ wakeEnabled: false });
+        return;
       }
+      restart = setTimeout(start, Math.min(1000 * retries, 5000));
     };
-
-    try {
-      rec.start();
-    } catch {
-      setWakeError("Could not start wake-word listener.");
-    }
-
+    start();
     return () => {
       cancelled = true;
-      try {
-        rec.stop();
-      } catch {
-        /* ignore */
-      }
+      clearTimeout(restart);
+      rec.onresult = rec.onerror = rec.onend = null;
+      try { rec.stop(); } catch { /* already stopped */ }
+      if (recRef.current === rec) recRef.current = null;
     };
-  }, [settings.wakeEnabled, voiceLang, handleRecognizedUtterance, onInterruptSpeech, onJarvisNotice, persistSettings]);
+  }, [settings.wakeEnabled, voiceLang, speaking, captureBusy, recording, foreground]);
 
   // Global keyboard shortcut (Ctrl+Shift+Space / Cmd+Shift+Space) & Tauri hotkey listener.
   useEffect(() => {
@@ -437,7 +437,11 @@ export function JarvisAssistantBar({
     };
   }, [onInterruptSpeech, onStartPushToTalk]);
 
-  const statusLabel = speaking
+  const statusLabel = recording || wakeHandoff
+    ? "Recording / listening…"
+    : captureBusy
+      ? "Processing — mic paused"
+      : speaking
     ? "Speaking"
     : wakeState === "awaiting_command"
       ? "Listening for command…"
@@ -525,10 +529,21 @@ export function JarvisAssistantBar({
         </div>
       ) : null}
 
+      <Modal open={recording} onClose={() => onCancelRecording?.()} title="QORVYNA is listening">
+        <div className="space-y-4 text-center">
+          <Mic size={40} className="mx-auto animate-pulse text-accent" />
+          <p role="status">Recording your command. Pause briefly to send, or send now.</p>
+          <p className="text-xs text-ink-3">The recording indicator and waveform also appear in the composer.</p>
+          <div className="flex justify-center gap-3">
+            <Button variant="ghost" onClick={onCancelRecording}>Cancel recording</Button>
+            <Button onClick={onFinishRecording}>Send now</Button>
+          </div>
+        </div>
+      </Modal>
       <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title="Jarvis Voice Assistant Settings">
         <div className="space-y-4 text-sm">
           <div className="rounded-xl border border-border bg-surface-2/60 p-3 text-xs text-ink-2">
-            Web wake-word listening (&ldquo;Hey AI&rdquo; / &ldquo;হেই এআই&rdquo;) runs strictly in the foreground while this tab is active — continuous background audio is never streamed to the cloud.
+            Web wake-word listening (&ldquo;Hey AI&rdquo; / &ldquo;হেই এআই&rdquo;) runs only while this tab is visible. Your browser may use an online speech recognition service; it is not guaranteed to be on-device.
           </div>
 
           {/* The installed app has a real system assistant (popup on desktop,

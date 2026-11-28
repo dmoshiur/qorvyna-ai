@@ -87,7 +87,7 @@ mkdirSync(outDir, { recursive: true });
 
 // The shared app references assets by absolute path (/brand/…); copy them so
 // the app looks identical inside the webview.
-const publicAssets = ["brand", "favicon.ico", "icon-192.png", "icon-512.png", "site.webmanifest", "sw.js"];
+const publicAssets = ["audio", "brand", "favicon.ico", "icon-192.png", "icon-512.png", "site.webmanifest", "sw.js"];
 for (const asset of publicAssets) {
   const from = join(root, "public", asset);
   if (!existsSync(from)) continue;

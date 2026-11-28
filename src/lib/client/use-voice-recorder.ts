@@ -156,6 +156,8 @@ export function useVoiceRecorder(options: Options = {}): {
   const [hasWaveform, setHasWaveform] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const captureEpochRef = useRef(0);
+  const startingRef = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -189,6 +191,8 @@ export function useVoiceRecorder(options: Options = {}): {
 
   /** Release the microphone, the meter, the timers and the wake lock. */
   const release = useCallback(() => {
+    captureEpochRef.current += 1;
+    startingRef.current = false;
     if (clockRef.current) clearInterval(clockRef.current);
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     clockRef.current = null; frameRef.current = null;
@@ -201,7 +205,10 @@ export function useVoiceRecorder(options: Options = {}): {
     recognitionWantedRef.current = false;
     const recognition = recognitionRef.current;
     recognitionRef.current = null;
-    if (recognition) { try { recognition.stop(); } catch { /* not running */ } }
+    if (recognition) {
+      recognition.onend = recognition.onresult = recognition.onerror = null;
+      try { recognition.stop(); } catch { /* not running */ }
+    }
     segmentRef.current = null;
     setGlobalRecording(false);
   }, [setGlobalRecording]);
@@ -357,7 +364,7 @@ export function useVoiceRecorder(options: Options = {}): {
   }, []);
 
   const start = useCallback(async (): Promise<{ ok: true } | { ok: false; message: string }> => {
-    if (state !== "idle") return { ok: true };
+    if (state !== "idle" || startingRef.current) return { ok: true };
     const support = recorderSupport();
     if (!support.recorder && !support.recognition) {
       return { ok: false, message: support.secure ? "This browser cannot record audio. Update it, or type your message." : "Voice recording needs a secure (HTTPS) connection." };
@@ -386,15 +393,24 @@ export function useVoiceRecorder(options: Options = {}): {
       return { ok: true };
     }
 
+    startingRef.current = true;
+    const epoch = ++captureEpochRef.current;
     setState("requesting");
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     } catch (error) {
+      if (epoch !== captureEpochRef.current) return { ok: false, message: "Recording cancelled." };
+      startingRef.current = false;
       setState("idle");
       const name = error instanceof Error ? error.name : "unknown";
       return { ok: false, message: name === "SecurityError" ? "The microphone is blocked on this page. Open QORVYNA over HTTPS and allow microphone access." : voiceErrorMessage(name) };
     }
+    if (epoch !== captureEpochRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return { ok: false, message: "Recording cancelled." };
+    }
+    startingRef.current = false;
     try {
       streamRef.current = stream;
       const mimeType = pickRecordingMimeType((type) => MediaRecorder.isTypeSupported(type));

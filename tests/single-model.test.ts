@@ -461,7 +461,7 @@ describe("the removed integrations are gone from the codebase", () => {
     expect(sources.some((file) => /glm-provider|managed-ai-providers|ai-provider-settings/.test(file.path))).toBe(false);
   });
 
-  it("names no other model family, provider endpoint or credential anywhere in src", () => {
+  it("keeps other providers out of chat routing except explicit live-media and admin adapters", () => {
     const banned = /\bglm[-_ ]?\d|GLM_|ZAI_|z\.ai|bigmodel\.cn|cogview|gemini|GEMINI_|generativelanguage\.googleapis|openrouter|OPENROUTER_|anthropic|ANTHROPIC_|\bclaude\b|nemotron|OLLAMA_|deepseek-|\bgpt-4|\bgpt-5|GROQ_VISION_MODEL/i;
     // The legacy z.ai/bigmodel GLM integration stays banned, but Cloudflare
     // Workers AI legitimately serves a GLM model from its own catalog — that
@@ -475,7 +475,11 @@ describe("the removed integrations are gone from the codebase", () => {
     // gemini.ts joins the allowlist as the Gemini credential/authentication
     // adapter for that configuration surface — it serves no chat route.
     const adminProviderFiles = /src\/(lib\/ai\/(provider-types|providers|provider-models|accounts|gemini)\.ts|components\/admin\/(provider-accounts|ai-config-tabs)\.tsx)$/;
+    // User-requested Gemini Live is a separate consented media session. It
+    // must not change the existing text-chat/agent provider routing policy.
+    const liveMediaFiles = /^src\/(app\/api\/voice\/live-token\/route\.ts|components\/voice\/live-conversation\.tsx|lib\/voice\/live-(audio|config)\.ts)$/;
     const offenders = sources
+      .filter((file) => !liveMediaFiles.test(file.path))
       // reasoning.ts documents which model families emit  blocks; image/config.ts
       // explains that a legacy saved image record is ignored.
       .filter((file) => !/src\/lib\/ai\/(reasoning|image\/config)\.ts$/.test(file.path))
@@ -508,13 +512,13 @@ describe("the removed integrations are gone from the codebase", () => {
     }
   });
 
-  it("deployment configs carry no credentials or model IDs for other models", () => {
+  it("deployment configs retain legacy bans except empty Live-only settings", () => {
     for (const file of [".env.example", "render.yaml", "apphosting.yaml"]) {
       const text = readFileSync(file, "utf8");
       // The Cloudflare Workers AI default model id is catalog data, not a
       // credential and not the removed legacy GLM integration — strip only
       // that exact spelling before applying the legacy bans.
-      const cleaned = text.split("@cf/zai-org/glm-4.7-flash").join("");
+      const cleaned = text.split("@cf/zai-org/glm-4.7-flash").join("").replace(/^GEMINI_(API_KEY|LIVE_MODEL)=\s*$/gm, "");
       expect(cleaned, file).not.toMatch(/GLM_|ZAI_|GEMINI_|OPENROUTER_|ANTHROPIC_|OLLAMA_|GROQ_CHAT_MODEL|GROQ_CODING_MODEL|GROQ_VISION_MODEL|glm-\d|cogview/);
       expect(text, file).toContain("GROQ_API_KEY");
     }

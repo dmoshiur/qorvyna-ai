@@ -92,6 +92,22 @@ try {
   assert.equal(modelTestCrossOrigin.status, 403, '/api/models/test must reject cross-origin CSRF');
   checks.push('/api/models/test (cross-origin): real HTTP 403');
 
+  const liveToken = await fetch(`${base}/api/voice/live-token`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base },
+    body: JSON.stringify({ language: 'bn-BD' }),
+  });
+  assert.equal(liveToken.status, 401);
+  const liveCsrf = await fetch(`${base}/api/voice/live-token`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://attacker.example' },
+    body: JSON.stringify({ language: 'auto' }),
+  });
+  assert.equal(liveCsrf.status, 403);
+  const liveWorklet = await fetch(`${base}/audio/live-capture.js`);
+  assert.equal(liveWorklet.status, 200);
+  assert.match(await liveWorklet.text(), /registerProcessor/);
+  assert.match(liveWorklet.headers.get('permissions-policy'), /camera=\(self\)/);
+  checks.push('/api/voice/live-token: real auth/CSRF 401/403; capture worklet HTTP 200; same-origin camera permission policy');
+
   const ping = await fetch(`${base}/api/ping`);
   assert.equal(ping.status, 200);
   const pingBody = await ping.json();

@@ -4,8 +4,8 @@
 // Platform honesty:
 //   - Web browsers only support foreground wake-word listening while the tab is
 //     open, visible, and microphone permission was explicitly granted.
-//   - Local wake-word phrase matching runs in-browser without streaming raw
-//     continuous audio to the cloud.
+//   - Phrase matching runs in-browser; browser speech recognition may use a
+//     remote service and is not guaranteed to be local.
 //   - Device-control intents classify risk honestly: sensitive/external actions
 //     ALWAYS require explicit user confirmation before execution.
 // =============================================================================
