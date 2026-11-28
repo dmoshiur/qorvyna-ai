@@ -197,9 +197,8 @@ jobs:
           # Verify the APK is really signed before publishing it.
           TOOL=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
           CERTS=$("$TOOL/apksigner" verify --print-certs "$UNIVERSAL" 2>&1) || fail "APK signature verification FAILED:${NL}$(grep -v "^WARNING" <<< "$CERTS" | tail -n 15)"
-          # (apksigner also prints one WARNING line per unsigned META-INF entry;
-          # grep reads it all, so no early-closing pipe can trip pipefail.)
-          grep "^Signer" <<< "$CERTS" || true
+          # (apksigner may also print WARNING lines; show only the certificates.)
+          grep "certificate" <<< "$CERTS" || true
           # ...and signed with the configured QORVYNA key. An APK signed with any
           # other certificate (e.g. a runner debug key) cannot update installed
           # copies — Android rejects it with "package conflicts with an existing
@@ -208,11 +207,14 @@ jobs:
           KEYINFO=$(keytool -list -v -keystore "$(prop storeFile)" -alias "$(prop keyAlias)" -storepass "$(prop storePassword)" 2>&1) \
             || fail "keytool could not read the signing keystore:${NL}$(tail -n 5 <<< "$KEYINFO")"
           EXPECTED=$(sed -n "s/^[[:space:]]*SHA256: *//p" <<< "$KEYINFO" | tr -d ": " | tr "[:upper:]" "[:lower:]")
-          ACTUAL=$(sed -n "s/^Signer[^:]* certificate SHA-256 digest: *//p" <<< "$CERTS" | sed -n 1p | tr -d ": " | tr "[:upper:]" "[:lower:]")
+          # Signer labels differ by apksigner version ("Signer #1 certificate …",
+          # "V2 Signer: certificate …"); every signer listed must be the QORVYNA key.
+          DIGESTS=$(sed -n "s/^.*certificate SHA-256 digest: *//p" <<< "$CERTS" | tr -d ": " | tr "[:upper:]" "[:lower:]" | sort -u)
+          ACTUAL=$(sed -n 1p <<< "$DIGESTS")
           echo "Expected signer SHA-256: $EXPECTED"
           echo "APK signer SHA-256:      $ACTUAL"
-          if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-            fail "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update).${NL}expected: $EXPECTED${NL}actual:   $ACTUAL${NL}apksigner $("$TOOL/apksigner" version 2>&1 || true) ($TOOL), $(wc -l <<< "$CERTS") output lines:${NL}$(grep -v "^WARNING" <<< "$CERTS" | sed -n 1,25p)"
+          if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$DIGESTS" ]; then
+            fail "APK is NOT signed with the QORVYNA release key — refusing to publish (it would not install as an update).${NL}expected: $EXPECTED${NL}actual:   ${DIGESTS//$NL/ }${NL}apksigner $("$TOOL/apksigner" version 2>&1 || true) ($TOOL), $(wc -l <<< "$CERTS") output lines:${NL}$(grep -v "^WARNING" <<< "$CERTS" | sed -n 1,25p)"
           fi
           echo "::notice title=APK signer::$ACTUAL (QORVYNA release key)"
           sha256sum release-assets/QORVYNA-AI-android.apk > release-assets/QORVYNA-AI-android.apk.sha256
