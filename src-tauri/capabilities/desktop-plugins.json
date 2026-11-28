@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-plugins",
+  "description": "Desktop-only plugin permissions (global shortcuts, shell open). Scoped to desktop platforms explicitly: on Android these plugin permissions do not exist, and an unscoped capability would fail the Android ACL build.",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": [
+    "main",
+    "assistant"
+  ],
+  "permissions": [
+    "global-shortcut:default",
+    "shell:allow-open"
+  ]
+}
