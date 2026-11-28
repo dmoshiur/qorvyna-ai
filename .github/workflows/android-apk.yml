@@ -61,19 +61,17 @@ jobs:
           cache: npm
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Set up the Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages (NDK 27, platform 34, build-tools 34)
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      # ubuntu-latest already ships the Android SDK (build-tools 34, platform
+      # android-34, NDK 27.x with ANDROID_HOME/ANDROID_NDK_HOME pre-set), so
+      # no setup-android action is needed — only licence acceptance, which
+      # lets Gradle auto-fetch any exact package version it wants.
+      - name: Accept Android SDK licences
+        run: yes | sdkmanager --licenses > /dev/null || true
 
       - name: Set up Rust with the Android cross-compile targets
         uses: dtolnay/rust-toolchain@stable
@@ -93,8 +91,6 @@ jobs:
       # wake-word plugin, notification listener), then builds a debug-signed
       # installable APK — the identical command documented for local builds.
       - name: Build the APK
-        env:
-          NDK_HOME: ${{ env.NDK_HOME }}
         run: npm run android:apk
 
       - name: List the produced APKs
