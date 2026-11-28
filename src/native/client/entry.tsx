@@ -28,8 +28,12 @@ if (container && assistantWindow) {
   );
 } else if (container) {
   // The native shell always opens on chat; history inside the app is real.
-  const startPath = typeof window !== "undefined" && window.location.pathname.length > 1
-    ? `${window.location.pathname}${window.location.search}`
+  // Tauri loads the window from `index.html` (tauri.conf.json → url), so the
+  // bundle's own document path means "app start", not a route — otherwise the
+  // router starts on `/index.html` and shows "This screen is not in the app".
+  const launchPath = typeof window !== "undefined" ? window.location.pathname : "/";
+  const startPath = launchPath.length > 1 && !/^\/index\.html?$/i.test(launchPath)
+    ? `${launchPath}${window.location.search}`
     : "/chat";
   createRoot(container).render(
     <ThemeProvider>

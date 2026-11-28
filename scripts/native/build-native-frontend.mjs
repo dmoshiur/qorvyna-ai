@@ -202,8 +202,13 @@ for (const asset of publicAssets) {
  * immutable name.
  */
 let cssName = "app.css";
+// Tailwind compiles to a temporary file: esbuild below emits the CSS that
+// components import (KaTeX) as `app.css` next to `app.js`, which used to
+// OVERWRITE the Tailwind stylesheet — the app then rendered completely
+// unstyled. Both are merged into `app.css` after esbuild runs.
+const tailwindOut = join(outDir, ".tailwind.css");
 try {
-  const cssOut = join(outDir, "app.css");
+  const cssOut = tailwindOut;
   execFileSync(
     process.platform === "win32" ? "npx.cmd" : "npx",
     ["@tailwindcss/cli", "--input", "src/app/globals.css", "--output", cssOut, "--minify"],
@@ -234,6 +239,15 @@ try {
       "--loader:.woff2=file",
       "--loader:.svg=dataurl",
       "--alias:@=./src",
+      // The shared components import the router from `next/navigation` /
+      // `next/link` and images from `next/image`. Outside a Next build those
+      // packages are Next's real runtime: it needs the App Router mounted and
+      // reads process.env.__NEXT_* (left unreplaced, the bundle throws
+      // "process is not defined" at boot → blank white screen in the APK).
+      // Point them at the native shell's drop-in implementations instead.
+      "--alias:next/navigation=./src/native/router.tsx",
+      "--alias:next/link=./src/native/router.tsx",
+      "--alias:next/image=./src/native/next-image.tsx",
       // Bake the environment the website gets from `next build`: Firebase
       // config (from env / google-services.json), the API origin and every
       // other NEXT_PUBLIC_* the shared source reads. An unreplaced
@@ -247,6 +261,17 @@ try {
   );
 } catch (error) {
   fail(`esbuild failed: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+// Merge: the design system first, then component-imported CSS (KaTeX).
+{
+  const cssPath = join(outDir, cssName);
+  const componentCss = existsSync(cssPath) ? readFileSync(cssPath, "utf8") : "";
+  writeFileSync(cssPath, `${readFileSync(tailwindOut, "utf8")}\n${componentCss}`);
+  rmSync(tailwindOut, { force: true });
+  console.log(
+    `[native] app.css: ${(statSync(cssPath).size / 1024).toFixed(0)} kB (Tailwind design system + ${(componentCss.length / 1024).toFixed(0)} kB component CSS)`,
+  );
 }
 
 writeFileSync(
